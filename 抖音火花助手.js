@@ -12,6 +12,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getResourceText
 // @grant        GM_addStyle
+// @homepage   				https://github.com/WordlMargin/DouyinFireTool
+// @source     				https://github.com/WordlMargin/DouyinFireTool/抖音火花助手.js
 // 不再使用 @require 加载 Monaco Editor，改用 createElement 方式加载
 // ==/UserScript==
 
