@@ -56,6 +56,7 @@
 
     // 存储键
     const KEY_PERSIST = 'dy_fire_persistent_targets_v1';
+    const KEY_MACROS = 'dy_fire_macros_v1';
 
     // 选择器参考自 fire.js
     const SELECTORS = {
@@ -66,9 +67,10 @@
 
     // 内存数据
     let staged = []; // 暂存数组 of {name}
-    let persistent = {}; // { name: { template: string } }
+    let persistent = {}; // { name: { template: string, macros: [] } }
     let activeEdit = null; // 当前编辑对象名
     let selectedSet = new Set(); // 选中用于批量发送的名字
+    let macros = {}; // { name: { code: string, enabled: boolean, description: string } }
 
     const KEY_SETTINGS = 'dy_fire_settings_v1';
     let settings = {
@@ -84,6 +86,13 @@
         const raw = GM_getValue(KEY_PERSIST, '{}');
         try {
             persistent = typeof raw === 'string' ? JSON.parse(raw) : raw;
+
+            // Ensure all templates have the macros array for backward compatibility
+            for (const [name, templateData] of Object.entries(persistent)) {
+                if (!templateData.macros) {
+                    templateData.macros = [];
+                }
+            }
         } catch (e) {
             persistent = {};
         }
@@ -118,6 +127,7 @@
             .dy-panel .dy-btn-add{ background: linear-gradient(90deg,#2dd4bf,#06b6d4); }
             .dy-panel .dy-btn-send{ background: linear-gradient(90deg,#10b981,#059669); }
             .dy-panel .dy-btn-remove{ background: linear-gradient(90deg,#f97316,#ef4444); }
+            .dy-panel .dy-btn-macro{ background: linear-gradient(90deg,#8b5cf6,#7c3aed); }
             .dy-panel input, .dy-panel textarea{ background:#0f1114; border:1px solid rgba(255,255,255,0.06); color:#e6eef8; padding:6px 8px; border-radius:6px; font-size:13px }
             .dy-panel .dy-list{ padding:6px; margin:0; list-style:none; max-height:40vh; overflow:auto; border-top:1px solid rgba(255,255,255,0.04); }
             /* 底部设置横向占满（避免全局竖向滚动） */
@@ -139,6 +149,32 @@
             .dy-panel .dy-resizer{ width:14px;height:14px; position:absolute; right:6px; bottom:6px; cursor:se-resize; border-radius:3px; background:linear-gradient(135deg, rgba(255,255,255,0.06), rgba(0,0,0,0.06)); }
             .dy-panel .dy-template-editor{ margin-top:8px; background:rgba(0,0,0,0.15); padding:8px; border-radius:6px }
             .dy-panel .dy-tpl-desc{ font-size:12px; color:#ddd; margin-bottom:6px }
+            /* 宏管理面板样式 */
+            .dy-panel .dy-macro-panel { display: none; }
+            .dy-panel .dy-macro-panel.active { display: block; }
+            .dy-panel .dy-macro-body { display: flex; gap: 10px; }
+            .dy-panel .dy-macro-column { flex: 1; background: rgba(255,255,255,0.03); padding: 8px; border-radius: 6px; max-height: 400px; overflow: auto; min-width: 250px; }
+            .dy-panel .dy-macro-column.manage-macros { border-right: 2px solid rgba(255,255,255,0.1); }
+            .dy-panel .dy-macro-column.apply-macros { border-left: 2px solid rgba(255,255,255,0.1); }
+            .dy-panel .dy-macro-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+            .dy-panel .dy-macro-title { font-size: 14px; font-weight: bold; color: #e6eef8; }
+            .dy-panel .dy-macro-item { padding: 8px; margin-bottom: 6px; background: rgba(0,0,0,0.2); border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); }
+            .dy-panel .dy-macro-item.enabled { border-left: 3px solid #10b981; }
+            .dy-panel .dy-macro-item.disabled { border-left: 3px solid #ef4444; opacity: 0.7; }
+            .dy-panel .dy-macro-item-name { font-weight: bold; margin-bottom: 4px; }
+            .dy-panel .dy-macro-item-desc { font-size: 12px; color: #aaa; margin-bottom: 6px; }
+            .dy-panel .dy-macro-item-code { font-family: monospace; font-size: 11px; background: rgba(0,0,0,0.3); padding: 4px; border-radius: 3px; overflow: auto; max-height: 60px; }
+            .dy-panel .dy-macro-actions { display: flex; gap: 4px; margin-top: 6px; }
+            .dy-panel .dy-macro-toggle { padding: 4px 6px; font-size: 11px; }
+            .dy-panel .dy-macro-edit { padding: 4px 6px; font-size: 11px; }
+            .dy-panel .dy-macro-delete { padding: 4px 6px; font-size: 11px; }
+            .dy-panel .dy-macro-form { margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 6px; }
+            .dy-panel .dy-macro-form input, .dy-panel .dy-macro-form textarea { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
+            .dy-panel .dy-macro-form textarea { min-height: 80px; }
+            .dy-panel .dy-macro-form-buttons { text-align: right; }
+            .dy-panel .dy-macro-select { width: 100%; padding: 6px; border-radius: 6px; background: #0f1114; border: 1px solid rgba(255,255,255,0.06); color: #e6eef8; }
+            .dy-panel .dy-macro-assign-btn { background: linear-gradient(90deg,#8b5cf6,#7c3aed); width: 100%; margin-top: 4px; }
+            .dy-panel .dy-macro-clear-btn { background: linear-gradient(90deg,#f97316,#ef4444); width: 100%; margin-top: 4px; }
             /* 模态模板编辑器 */
             #dy-template-modal { position: fixed; left: 0; top: 0; right: 0; bottom: 0; display: none; z-index: 10000; }
             #dy-template-modal .dy-tpl-overlay { position: absolute; left:0;top:0;right:0;bottom:0; background: rgba(0,0,0,0.45); display:flex; align-items:center; justify-content:center; padding:20px; transition: opacity 200ms ease; }
@@ -349,7 +385,33 @@
     }
 
     function savePersistent() {
+        // Ensure all templates have the macros array before saving
+        for (const [name, templateData] of Object.entries(persistent)) {
+            if (!templateData.macros) {
+                templateData.macros = [];
+            }
+        }
         GM_setValue(KEY_PERSIST, JSON.stringify(persistent));
+    }
+
+    function loadMacros() {
+        const raw = GM_getValue(KEY_MACROS, '{}');
+        try {
+            macros = typeof raw === 'string' ? JSON.parse(raw) : raw;
+
+            // Ensure all macros have the enabled property for backward compatibility
+            for (const [name, macroData] of Object.entries(macros)) {
+                if (typeof macroData.enabled === 'undefined') {
+                    macroData.enabled = true; // Default to enabled for backward compatibility
+                }
+            }
+        } catch (e) {
+            macros = {};
+        }
+    }
+
+    function saveMacros() {
+        GM_setValue(KEY_MACROS, JSON.stringify(macros));
     }
 
     function loadSettings() {
@@ -405,6 +467,7 @@
                     <div class="dy-controls">
                         <button id="dy-fetch-chats" class="dy-btn dy-btn-light">抓取聊天</button>
                         <button id="dy-batch-send" class="dy-btn dy-btn-light">批量发送选中</button>
+                        <button id="dy-macro-manager" class="dy-btn dy-btn-macro">宏管理</button>
                         <button id="dy-theme-toggle" class="dy-btn dy-btn-light">主题</button>
                         <button id="dy-minimize" class="dy-btn dy-btn-light">—</button>
                         <button id="dy-close-panel" class="dy-btn dy-btn-light">×</button>
@@ -517,6 +580,10 @@
         if (themeToggle) themeToggle.addEventListener('click', toggleTheme);
         const minBtn = document.getElementById('dy-minimize');
         if (minBtn) minBtn.addEventListener('click', () => toggleMinimize(panel));
+        const macroManagerBtn = document.getElementById('dy-macro-manager');
+        if (macroManagerBtn) macroManagerBtn.addEventListener('click', () => {
+            openMacroManagerModal();
+        });
         const followCb = document.getElementById('dy-follow-system');
         if (followCb) {
             followCb.checked = !!settings.followSystemTheme;
@@ -708,6 +775,26 @@
     
 
 
+    // Update modal preview function - global scope
+    window.updateModalPreview = function() {
+        const preview = document.getElementById('dy-modal-preview');
+        if (!preview) return;
+        const ta = document.getElementById('dy-modal-editor-text');
+        const source = (window.__dy_monaco_editor && window.__dy_monaco_editor.getModel) ? window.__dy_monaco_editor.getModel().getValue() : (ta ? ta.value : '');
+        const sampleCtx = { targetName: activeEdit || '目标' };
+        try {
+            // 尝试渲染模板，检查是否有语法错误
+            const out = renderTemplate(source || '', sampleCtx, activeEdit || '目标');
+            preview.style.color = '';
+            preview.style.background = '';
+            preview.textContent = out;
+        } catch (e) {
+            preview.style.color = '#ff6b6b';
+            preview.style.background = 'rgba(255, 107, 107, 0.1)';
+            preview.textContent = `模板错误: ${e.message}`;
+        }
+    };
+
     function ensureTemplateModalExists() {
         if (document.getElementById('dy-template-modal')) return;
         const modal = document.createElement('div');
@@ -794,28 +881,7 @@
             }
         }
 
-        // 将updateModalPreview函数提升到全局作用域
-        window.updateModalPreview = function() {
-            const preview = document.getElementById('dy-modal-preview');
-            if (!preview) return;
-            const ta = document.getElementById('dy-modal-editor-text');
-            const source = (window.__dy_monaco_editor && window.__dy_monaco_editor.getModel) ? window.__dy_monaco_editor.getModel().getValue() : (ta ? ta.value : '');
-            const sampleCtx = { targetName: activeEdit || '目标' };
-            try {
-                // 尝试渲染模板，检查是否有语法错误
-                const out = renderTemplate(source || '', sampleCtx);
-                preview.style.color = '';
-                preview.style.background = '';
-                preview.textContent = out;
-            } catch (e) {
-                preview.style.color = '#ff6b6b';
-                preview.style.background = 'rgba(255, 107, 107, 0.1)';
-                preview.textContent = `模板错误: ${e.message}`;
-            }
-        };
 
-        // 保留局部函数引用，以便在ensureTemplateModalExists内部使用
-        const updateModalPreview = window.updateModalPreview;
 
         // Monaco Editor 将在第一次打开模态框时初始化
 
@@ -1050,7 +1116,7 @@
         // 简单淡入
         const overlay = modal.querySelector('.dy-tpl-overlay');
         if (overlay) overlay.style.opacity = '1';
-        
+
         // 如果 Monaco Editor 已初始化，更新布局
         setTimeout(() => {
             try {
@@ -1060,7 +1126,8 @@
                 }
             } catch (e) {}
         }, 50);
-        
+
+
         window.addEventListener('keydown', modal._kbdHandler);
     }
 
@@ -1115,6 +1182,522 @@
         if (box && box.classList.contains('dy-fullscreen')) {
             box.classList.remove('dy-fullscreen');
         }
+    }
+
+    // Macro Manager Modal Functions
+    function ensureMacroModalExists() {
+        if (document.getElementById('dy-macro-modal')) return;
+        const modal = document.createElement('div');
+        modal.id = 'dy-macro-modal';
+        modal.style.display = 'none';
+        modal.innerHTML = `
+            <div class="dy-macro-overlay">
+                <div class="dy-macro-box">
+                    <div class="dy-macro-box-header">
+                        <strong>宏管理系统</strong>
+                        <div class="dy-macro-box-controls">
+                            <button id="dy-macro-cancel" class="dy-btn dy-btn-light">关闭</button>
+                        </div>
+                    </div>
+                    <div class="dy-macro-box-body">
+                        <div class="dy-macro-body">
+                            <div class="dy-macro-column manage-macros">
+                                <div class="dy-title">管理宏</div>
+                                <ul id="dy-manage-macros-list" class="dy-list"></ul>
+                                <div class="dy-macro-form">
+                                    <input type="text" id="dy-macro-name" placeholder="宏名称" />
+                                    <input type="text" id="dy-macro-desc" placeholder="宏描述（可选）" />
+                                    <div id="dy-macro-editor-container" class="monaco-container" style="width:100%;min-height:120px;height:200px;margin-top:8px"></div>
+                                    <textarea id="dy-macro-code" placeholder="宏代码..." style="display:none;width:100%;min-height:120px;margin-top:8px"></textarea>
+                                    <div class="dy-macro-form-buttons" style="text-align:right;margin-top:8px">
+                                        <button id="dy-save-macro" class="dy-btn">保存宏</button>
+                                        <button id="dy-clear-macro-form" class="dy-btn dy-btn-light">清空</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="dy-macro-column apply-macros">
+                                <div class="dy-title">应用宏</div>
+                                <ul id="dy-apply-macros-list" class="dy-list"></ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        // Add CSS for the macro modal
+        if (!document.getElementById('dy-macro-styles')) {
+            const macroStyles = document.createElement('style');
+            macroStyles.id = 'dy-macro-styles';
+            macroStyles.innerHTML = `
+                /* Enhanced macro management panel styles */
+                #dy-macro-modal {
+                    position: fixed;
+                    left: 0;
+                    top: 0;
+                    right: 0;
+                    bottom: 0;
+                    display: none;
+                    z-index: 10001;
+                }
+                #dy-macro-modal .dy-macro-overlay {
+                    position: absolute;
+                    left:0; top:0; right:0; bottom:0;
+                    background: rgba(0,0,0,0.65);
+                    display:flex;
+                    align-items:center;
+                    justify-content:center;
+                    padding:20px;
+                    transition: opacity 200ms ease;
+                }
+                #dy-macro-modal .dy-macro-box {
+                    width: min(1000px, 96%);
+                    background: linear-gradient(160deg, #1e1e2a, #14141c);
+                    color:#e6eef8;
+                    border-radius:16px;
+                    padding:16px;
+                    box-shadow:0 20px 60px rgba(0,0,0,0.7);
+                    max-height:92vh;
+                    overflow:auto;
+                    transition: all 0.3s ease;
+                    border: 1px solid rgba(255,255,255,0.08);
+                }
+                #dy-macro-modal .dy-macro-box-header {
+                    display:flex;
+                    justify-content:space-between;
+                    align-items:center;
+                    margin-bottom:12px;
+                    padding-bottom: 12px;
+                    border-bottom: 1px solid rgba(255,255,255,0.1);
+                }
+                #dy-macro-modal .dy-macro-box-controls {
+                    display:flex;
+                    gap: 8px;
+                }
+                #dy-macro-modal.dy-theme-light .dy-macro-box {
+                    background: linear-gradient(160deg, #ffffff, #f8fafc);
+                    color:#111827;
+                    border: 1px solid rgba(0,0,0,0.08);
+                }
+                #dy-macro-modal .dy-macro-box-body {
+                    margin-bottom:8px
+                }
+                .dy-macro-body {
+                    display: flex;
+                    gap: 16px;
+                    min-height: 500px;
+                }
+                .dy-macro-column {
+                    flex: 1;
+                    background: rgba(255,255,255,0.04);
+                    padding: 12px;
+                    border-radius: 10px;
+                    max-height: 550px;
+                    overflow: auto;
+                    min-width: 300px;
+                    border: 1px solid rgba(255,255,255,0.06);
+                    box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+                    transition: all 0.3s ease;
+                }
+                .dy-macro-column:hover {
+                    box-shadow: 0 6px 12px rgba(0,0,0,0.1);
+                    border-color: rgba(255,255,255,0.1);
+                }
+                .dy-macro-column.manage-macros {
+                    border-right: 2px solid rgba(139, 92, 246, 0.2);
+                }
+                .dy-macro-column.apply-macros {
+                    border-left: 2px solid rgba(59, 130, 246, 0.2);
+                }
+                .dy-macro-header {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    margin-bottom: 8px;
+                }
+                .dy-macro-title {
+                    font-size: 16px;
+                    font-weight: 600;
+                    color: #c7d2fe;
+                    display: flex;
+                    align-items: center;
+                }
+                .dy-macro-title::before {
+                    content: "⚡";
+                    margin-right: 8px;
+                    font-size: 14px;
+                }
+                .dy-macro-item {
+                    padding: 12px;
+                    margin-bottom: 10px;
+                    background: rgba(0,0,0,0.2);
+                    border-radius: 8px;
+                    border: 1px solid rgba(255,255,255,0.1);
+                    transition: all 0.2s ease;
+                    position: relative;
+                    overflow: hidden;
+                }
+                .dy-macro-item::before {
+                    content: '';
+                    position: absolute;
+                    top: 0;
+                    left: 0;
+                    width: 3px;
+                    height: 100%;
+                    background: linear-gradient(to bottom, #8b5cf6, #3b82f6);
+                }
+                .dy-macro-item:hover {
+                    background: rgba(255,255,255,0.06);
+                    transform: translateY(-2px);
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                }
+                .dy-macro-item.enabled {
+                    border-left: 4px solid #10b981;
+                }
+                .dy-macro-item.enabled::before {
+                    background: linear-gradient(to bottom, #10b981, #34d399);
+                }
+                .dy-macro-item.disabled {
+                    border-left: 4px solid #ef4444;
+                    opacity: 0.7;
+                }
+                .dy-macro-item.disabled::before {
+                    background: linear-gradient(to bottom, #ef4444, #f87171);
+                }
+                .dy-macro-item-name {
+                    font-weight: 600;
+                    margin-bottom: 4px;
+                    color: #e0e7ff;
+                    font-size: 14px;
+                }
+                .dy-macro-item-desc {
+                    font-size: 13px;
+                    color: #94a3b8;
+                    margin-bottom: 6px;
+                }
+                .dy-macro-item-code {
+                    font-family: 'Fira Code', 'Consolas', monospace;
+                    font-size: 12px;
+                    background: rgba(0,0,0,0.3);
+                    padding: 6px;
+                    border-radius: 4px;
+                    overflow: auto;
+                    max-height: 80px;
+                    color: #cbd5e1;
+                    border: 1px solid rgba(255,255,255,0.05);
+                }
+                .dy-macro-item-templates {
+                    font-size: 11px;
+                    color: #64748b;
+                    margin-top: 6px;
+                    padding-top: 6px;
+                    border-top: 1px solid rgba(255,255,255,0.05);
+                }
+                .dy-macro-actions {
+                    display: flex;
+                    gap: 6px;
+                    margin-top: 8px;
+                    justify-content: flex-end;
+                }
+                .dy-macro-toggle {
+                    padding: 6px 10px;
+                    font-size: 12px;
+                    border-radius: 6px;
+                    min-width: 60px;
+                }
+                .dy-macro-edit {
+                    padding: 6px 10px;
+                    font-size: 12px;
+                    border-radius: 6px;
+                    min-width: 50px;
+                }
+                .dy-macro-delete {
+                    padding: 6px 10px;
+                    font-size: 12px;
+                    border-radius: 6px;
+                    min-width: 50px;
+                }
+                .dy-macro-form {
+                    margin-top: 16px;
+                    padding: 12px;
+                    background: rgba(0,0,0,0.2);
+                    border-radius: 8px;
+                    border: 1px solid rgba(255,255,255,0.08);
+                }
+                .dy-macro-form input,
+                .dy-macro-form textarea {
+                    width: 100%;
+                    box-sizing: border-box;
+                    margin-bottom: 8px;
+                    padding: 10px;
+                    border-radius: 6px;
+                    background: rgba(0,0,0,0.3);
+                    border: 1px solid rgba(255,255,255,0.1);
+                    color: #e6eef8;
+                }
+                .dy-macro-form textarea {
+                    min-height: 120px;
+                    font-family: 'Fira Code', 'Consolas', monospace;
+                    font-size: 13px;
+                }
+                .dy-macro-form-buttons {
+                    text-align: right;
+                    margin-top: 8px;
+                }
+                .dy-macro-select {
+                    width: 100%;
+                    padding: 10px;
+                    border-radius: 8px;
+                    background: rgba(0,0,0,0.3);
+                    border: 1px solid rgba(255,255,255,0.1);
+                    color: #e6eef8;
+                    font-size: 13px;
+                    margin-bottom: 8px;
+                }
+                .dy-macro-assign-btn {
+                    background: linear-gradient(90deg,#8b5cf6,#6366f1);
+                    width: 100%;
+                    margin-top: 4px;
+                    padding: 10px;
+                    border-radius: 8px;
+                    font-weight: 500;
+                }
+                .dy-macro-clear-btn {
+                    background: linear-gradient(90deg,#f97316,#ea580c);
+                    width: 100%;
+                    margin-top: 6px;
+                    padding: 10px;
+                    border-radius: 8px;
+                    font-weight: 500;
+                }
+                .dy-macro-assign-btn:hover {
+                    background: linear-gradient(90deg,#7c3aed,#4f46e5);
+                    transform: translateY(-1px);
+                    box-shadow: 0 4px 8px rgba(139, 92, 246, 0.3);
+                }
+                .dy-macro-clear-btn:hover {
+                    background: linear-gradient(90deg,#ea580c,#c2410c);
+                    transform: translateY(-1px);
+                    box-shadow: 0 4px 8px rgba(249, 115, 22, 0.3);
+                }
+                .dy-macro-toggle:hover {
+                    background: linear-gradient(90deg,#4b5563,#374151);
+                    transform: translateY(-1px);
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+                }
+                .dy-macro-edit:hover {
+                    background: linear-gradient(90deg,#22c55e,#16a34a);
+                    transform: translateY(-1px);
+                    box-shadow: 0 2px 6px rgba(34, 197, 94, 0.3);
+                }
+                .dy-macro-delete:hover {
+                    background: linear-gradient(90deg,#ef4444,#dc2626);
+                    transform: translateY(-1px);
+                    box-shadow: 0 2px 6px rgba(239, 68, 68, 0.3);
+                }
+                .dy-macro-form input:focus,
+                .dy-macro-form textarea:focus,
+                .dy-macro-select:focus {
+                    outline: none;
+                    border-color: #8b5cf6;
+                    box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.3);
+                }
+                /* Light theme overrides */
+                .dy-macro-column.dy-theme-light {
+                    background: rgba(0,0,0,0.03);
+                    border: 1px solid rgba(0,0,0,0.06);
+                }
+                .dy-macro-item.dy-theme-light {
+                    background: rgba(0,0,0,0.02);
+                    border: 1px solid rgba(0,0,0,0.05);
+                    color: #111827;
+                }
+                .dy-macro-item-name.dy-theme-light {
+                    color: #111827;
+                }
+                .dy-macro-item-desc.dy-theme-light {
+                    color: #6b7280;
+                }
+                .dy-macro-item-code.dy-theme-light {
+                    background: rgba(0,0,0,0.03);
+                    border: 1px solid rgba(0,0,0,0.05);
+                    color: #374151;
+                }
+                .dy-macro-form.dy-theme-light {
+                    background: rgba(0,0,0,0.02);
+                    border: 1px solid rgba(0,0,0,0.06);
+                }
+                .dy-macro-form input.dy-theme-light,
+                .dy-macro-form textarea.dy-theme-light {
+                    background: #ffffff;
+                    border: 1px solid rgba(0,0,0,0.1);
+                    color: #111827;
+                }
+                .dy-macro-select.dy-theme-light {
+                    background: #ffffff;
+                    border: 1px solid rgba(0,0,0,0.1);
+                    color: #111827;
+                }
+                /* Scrollbar styling */
+                .dy-macro-column::-webkit-scrollbar {
+                    width: 8px;
+                }
+                .dy-macro-column::-webkit-scrollbar-track {
+                    background: rgba(0,0,0,0.1);
+                    border-radius: 4px;
+                }
+                .dy-macro-column::-webkit-scrollbar-thumb {
+                    background: rgba(255,255,255,0.2);
+                    border-radius: 4px;
+                }
+                .dy-macro-column::-webkit-scrollbar-thumb:hover {
+                    background: rgba(255,255,255,0.3);
+                }
+            `;
+            document.head.appendChild(macroStyles);
+        }
+
+        // Event bindings for macro modal
+        document.getElementById('dy-macro-cancel').addEventListener('click', closeMacroModal);
+        document.getElementById('dy-save-macro').addEventListener('click', saveMacroFromForm);
+        document.getElementById('dy-clear-macro-form').addEventListener('click', () => {
+            document.getElementById('dy-macro-name').value = '';
+            document.getElementById('dy-macro-desc').value = '';
+            if (window.__dy_macro_monaco_editor && window.__dy_macro_monaco_editor.getModel) {
+                window.__dy_macro_monaco_editor.getModel().setValue('');
+            } else {
+                document.getElementById('dy-macro-code').value = '';
+            }
+        });
+    }
+
+    function openMacroManagerModal() {
+        ensureMacroModalExists();
+        const modal = document.getElementById('dy-macro-modal');
+        if (!modal) return;
+
+        // Apply theme
+        if (settings.theme === 'light') modal.classList.add('dy-theme-light'); else modal.classList.remove('dy-theme-light');
+
+        // Initialize Monaco Editor for macro code if not already done
+        const codeTextarea = document.getElementById('dy-macro-code');
+        const editorContainer = document.getElementById('dy-macro-editor-container');
+
+        if (!window.__dy_macro_monaco_editor) {
+            // Show textarea initially, Monaco will replace it
+            codeTextarea.style.display = 'block';
+            editorContainer.style.display = 'none';
+
+            // Load Monaco Editor for macro
+            loadMonacoEditorOnce().then((monaco) => {
+                if (!monaco) return;
+
+                // Initialize editor
+                const chosenTheme = (settings && settings.theme === 'light') ? 'dy-light' : 'dy-dark';
+
+                // Create editor instance for macro
+                window.__dy_macro_monaco_editor = monaco.editor.create(editorContainer, {
+                    value: codeTextarea.value,
+                    language: 'javascript',
+                    theme: chosenTheme,
+                    lineNumbers: 'on',
+                    wordWrap: 'on',
+                    minimap: { enabled: false },
+                    scrollBeyondLastLine: false,
+                    automaticLayout: true,
+                    suggestOnTriggerCharacters: true,
+                    quickSuggestions: true,
+                    parameterHints: { enabled: true },
+                });
+
+                // Add auto-completion for macro-specific keywords
+                monaco.languages.registerCompletionItemProvider('javascript', {
+                    provideCompletionItems: function(model, position) {
+                        const word = model.getWordUntilPosition(position);
+                        const range = {
+                            startLineNumber: position.lineNumber,
+                            endLineNumber: position.lineNumber,
+                            startColumn: word.startColumn,
+                            endColumn: word.endColumn
+                        };
+
+                        return {
+                            suggestions: [
+                                {
+                                    label: '$targetName',
+                                    kind: monaco.languages.CompletionItemKind.Variable,
+                                    insertText: '$targetName',
+                                    range: range,
+                                    documentation: '目标名称'
+                                },
+                                {
+                                    label: '$date',
+                                    kind: monaco.languages.CompletionItemKind.Variable,
+                                    insertText: '$date',
+                                    range: range,
+                                    documentation: '当前日期'
+                                },
+                                {
+                                    label: '$sinceDate("YYYY-M-D")',
+                                    kind: monaco.languages.CompletionItemKind.Function,
+                                    insertText: '$sinceDate("YYYY-M-D")',
+                                    range: range,
+                                    documentation: '相识天数'
+                                }
+                            ]
+                        };
+                    }
+                });
+
+                // Hide textarea and show editor
+                codeTextarea.style.display = 'none';
+                editorContainer.style.display = 'block';
+
+                // Sync changes between editor and textarea
+                const changeHandler = () => {
+                    const content = window.__dy_macro_monaco_editor.getModel().getValue();
+                    codeTextarea.value = content;
+                };
+
+                // Remove old listener if exists
+                if (window.__dy_macro_monaco_editor._changeDisposable) {
+                    window.__dy_macro_monaco_editor._changeDisposable.dispose();
+                }
+
+                // Add new listener
+                window.__dy_macro_monaco_editor._changeDisposable = window.__dy_macro_monaco_editor.onDidChangeModelContent(changeHandler);
+            });
+        } else {
+            // Monaco editor already exists, just update content and theme
+            if (window.__dy_macro_monaco_editor && window.__dy_macro_monaco_editor.getModel) {
+                // Update theme
+                const chosenTheme = (settings && settings.theme === 'light') ? 'dy-light' : 'dy-dark';
+                monaco.editor.setTheme(chosenTheme);
+
+                // Show editor and hide textarea
+                codeTextarea.style.display = 'none';
+                editorContainer.style.display = 'block';
+            } else {
+                // Fallback to textarea
+                codeTextarea.style.display = 'block';
+                editorContainer.style.display = 'none';
+            }
+        }
+
+        // Show the modal
+        modal.style.display = 'block';
+        const overlay = modal.querySelector('.dy-macro-overlay');
+        if (overlay) overlay.style.opacity = '1';
+
+        // Render macro lists
+        renderMacroLists();
+    }
+
+    function closeMacroModal() {
+        const modal = document.getElementById('dy-macro-modal');
+        if (!modal) return;
+        modal.style.display = 'none';
     }
 
     function renderLists() {
@@ -1176,13 +1759,27 @@
         if (timeInput) timeInput.value = settings.schedulerTime || '';
         if (intervalInput) intervalInput.value = settings.sendIntervalSec || 3;
         updateSchedulerStatus();
+
+        // 宏管理面板事件绑定
+        const saveMacroBtn = document.getElementById('dy-save-macro');
+        if (saveMacroBtn) saveMacroBtn.addEventListener('click', saveMacroFromForm);
+
+        const clearMacroFormBtn = document.getElementById('dy-clear-macro-form');
+        if (clearMacroFormBtn) clearMacroFormBtn.addEventListener('click', () => {
+            document.getElementById('dy-macro-name').value = '';
+            document.getElementById('dy-macro-desc').value = '';
+            document.getElementById('dy-macro-code').value = '';
+        });
+
+        // 渲染宏列表
+        renderMacroLists();
     }
 
     function onPersist(e) {
         const name = e.currentTarget.dataset.name;
         if (!name) return;
         if (!persistent[name]) {
-            persistent[name] = { template: 'return \`自动续火花-$date\n$targetName\`' };
+            persistent[name] = { template: 'return \`自动续火花-$date\n$targetName\`', macros: [] };
         }
         // 从暂存移除
         staged = staged.filter(n => n !== name);
@@ -1214,8 +1811,12 @@
             const editorText = document.getElementById('dy-modal-editor-text') || document.getElementById('dy-editor-text');
             tpl = (editorText && editorText.value) ? editorText.value : '';
         }
-        if (!persistent[activeEdit]) persistent[activeEdit] = { template: tpl };
-        else persistent[activeEdit].template = tpl;
+        if (!persistent[activeEdit]) persistent[activeEdit] = { template: tpl, macros: [] };
+        else {
+            persistent[activeEdit].template = tpl;
+            // Ensure macros array exists
+            if (!persistent[activeEdit].macros) persistent[activeEdit].macros = [];
+        }
         savePersistent();
         renderLists();
         // 关闭模态
@@ -1226,7 +1827,7 @@
         const name = e.currentTarget.dataset.name;
         if (!name) return;
         const tpl = (persistent[name] && persistent[name].template) || 'return \`自动续火花-$date\n$targetName\`';
-        const rendered = renderTemplate(tpl, { targetName: name });
+        const rendered = renderTemplate(tpl, { targetName: name }, name);
         sendToTarget(name, rendered).then(ok => {
             if (ok) {
                 notify('发送成功', name + ' 已发送');
@@ -1265,7 +1866,7 @@
         for (let i = 0; i < names.length; i++) {
             const name = names[i];
             const tpl = (persistent[name] && persistent[name].template) || 'return \`自动续火花-$date\n$targetName\`';
-            const rendered = renderTemplate(tpl, { targetName: name });
+            const rendered = renderTemplate(tpl, { targetName: name }, name);
             const ok = await sendToTarget(name, rendered);
             if (statusEl) statusEl.textContent = `发送中: ${i+1}/${names.length}`;
             await sleep((settings.sendIntervalSec || 3) * 1000);
@@ -1275,6 +1876,263 @@
     }
 
     function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+    // 宏管理相关函数
+    function addMacro(name, code, description = '', enabled = true) {
+        if (!name || !code) return false;
+        macros[name] = {
+            code: code,
+            enabled: enabled,
+            description: description
+        };
+        saveMacros();
+        return true;
+    }
+
+    function updateMacro(name, code, description = '', enabled = true) {
+        if (!name || !macros[name]) return false;
+        macros[name] = {
+            code: code,
+            enabled: enabled,
+            description: description
+        };
+        saveMacros();
+        return true;
+    }
+
+    function deleteMacro(name) {
+        if (!macros[name]) return false;
+
+        // Remove this macro from all templates that use it
+        for (const [templateName, templateData] of Object.entries(persistent)) {
+            if (templateData.macros && templateData.macros.includes(name)) {
+                templateData.macros = templateData.macros.filter(macroName => macroName !== name);
+            }
+        }
+
+        delete macros[name];
+        saveMacros();
+        savePersistent(); // Save the updated templates
+        return true;
+    }
+
+    function toggleMacro(name) {
+        if (!macros[name]) return false;
+        macros[name].enabled = !macros[name].enabled;
+        saveMacros();
+        return true;
+    }
+
+    function renderMacroLists() {
+        const manageList = document.getElementById('dy-manage-macros-list');
+        const applyList = document.getElementById('dy-apply-macros-list');
+
+        if (!manageList || !applyList) return;
+
+        // Clear lists
+        manageList.innerHTML = '';
+        applyList.innerHTML = '';
+
+        // Populate manage list
+        Object.keys(macros).forEach(name => {
+            const macro = macros[name];
+
+            // Find which templates use this macro
+            const templatesUsingMacro = [];
+            for (const [templateName, templateData] of Object.entries(persistent)) {
+                if (templateData.macros && templateData.macros.includes(name)) {
+                    templatesUsingMacro.push(templateName);
+                }
+            }
+
+            const li = document.createElement('li');
+            li.className = `dy-macro-item ${macro.enabled ? 'enabled' : 'disabled'}`;
+            li.innerHTML = `
+                <div class="dy-macro-item-name">${escapeHtml(name)}</div>
+                <div class="dy-macro-item-desc">${escapeHtml(macro.description || '无描述')}</div>
+                <div class="dy-macro-item-code">${escapeHtml(macro.code.substring(0, 100))}${macro.code.length > 100 ? '...' : ''}</div>
+                <div class="dy-macro-item-templates" style="font-size:11px;color:#aaa;margin-top:4px">
+                    ${templatesUsingMacro.length > 0 ? `被 ${templatesUsingMacro.length} 个模板使用: ${escapeHtml(templatesUsingMacro.slice(0, 3).join(', '))}${templatesUsingMacro.length > 3 ? '...' : ''}` : '未被任何模板使用'}
+                </div>
+                <div class="dy-macro-actions">
+                    <button class="dy-btn dy-macro-toggle" data-name="${escapeAttr(name)}">${macro.enabled ? '禁用' : '启用'}</button>
+                    <button class="dy-btn dy-macro-edit" data-name="${escapeAttr(name)}">编辑</button>
+                    <button class="dy-btn dy-macro-delete" data-name="${escapeAttr(name)}">删除</button>
+                </div>
+            `;
+            manageList.appendChild(li);
+        });
+
+        // Populate apply list - show all templates with macro assignment interface
+        Object.keys(persistent).forEach(templateName => {
+            const templateData = persistent[templateName];
+
+            const li = document.createElement('li');
+            li.className = 'dy-macro-item';
+            li.innerHTML = `
+                <div class="dy-macro-item-name">${escapeHtml(templateName)}</div>
+                <div class="dy-macro-item-desc">当前宏: ${templateData.macros && templateData.macros.length > 0 ? escapeHtml(templateData.macros.join(', ')) : '无'}</div>
+                <div class="dy-macro-assign" style="margin-top:8px">
+                    <select class="dy-macro-select" data-template="${escapeAttr(templateName)}" style="width:100%;padding:4px;margin-bottom:4px;">
+                        <option value="">选择宏...</option>
+                        ${Object.entries(macros).map(([name, macro]) =>
+                            `<option value="${escapeAttr(name)}" ${templateData.macros && templateData.macros.includes(name) ? 'selected' : ''}>${escapeHtml(name)}</option>`
+                        ).join('')}
+                    </select>
+                    <button class="dy-btn dy-macro-assign-btn" data-template="${escapeAttr(templateName)}">添加宏到模板</button>
+                    <button class="dy-btn dy-macro-clear-btn" data-template="${escapeAttr(templateName)}" style="margin-top:4px;">清空模板宏</button>
+                </div>
+            `;
+            applyList.appendChild(li);
+        });
+
+        // If no templates exist, show a message
+        if (applyList.children.length === 0) {
+            const li = document.createElement('li');
+            li.className = 'dy-macro-item';
+            li.innerHTML = `<div class="dy-macro-item-desc" style="text-align:center;color:#aaa">暂无续火花目标</div>`;
+            applyList.appendChild(li);
+        }
+
+        // Bind events for manage list
+        document.querySelectorAll('.dy-macro-toggle').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const name = e.currentTarget.dataset.name;
+                toggleMacro(name);
+                renderMacroLists(); // Refresh the lists
+            });
+        });
+
+        document.querySelectorAll('.dy-macro-edit').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const name = e.currentTarget.dataset.name;
+                const macro = macros[name];
+                if (macro) {
+                    document.getElementById('dy-macro-name').value = name;
+                    document.getElementById('dy-macro-desc').value = macro.description || '';
+                    document.getElementById('dy-macro-code').value = macro.code;
+
+                    // Also update the Monaco editor if it exists
+                    if (window.__dy_macro_monaco_editor && window.__dy_macro_monaco_editor.getModel) {
+                        window.__dy_macro_monaco_editor.getModel().setValue(macro.code);
+                    } else {
+                        document.getElementById('dy-macro-code').value = macro.code;
+                    }
+                }
+            });
+        });
+
+        document.querySelectorAll('.dy-macro-delete').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const name = e.currentTarget.dataset.name;
+                if (confirm(`确定要删除宏 "${name}" 吗？\n注意：此宏可能被某些模板使用，删除后这些模板将无法执行该宏。`)) {
+                    deleteMacro(name);
+                    renderMacroLists(); // Refresh the lists
+                    // Clear form if the deleted macro was being edited
+                    if (document.getElementById('dy-macro-name').value === name) {
+                        document.getElementById('dy-macro-name').value = '';
+                        document.getElementById('dy-macro-desc').value = '';
+                        document.getElementById('dy-macro-code').value = '';
+
+                        // Clear Monaco editor if it exists
+                        if (window.__dy_macro_monaco_editor && window.__dy_macro_monaco_editor.getModel) {
+                            window.__dy_macro_monaco_editor.getModel().setValue('');
+                        }
+                    }
+                }
+            });
+        });
+
+        // Bind events for macro assignment
+        document.querySelectorAll('.dy-macro-assign-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const templateName = e.currentTarget.dataset.template;
+                const selectElement = document.querySelector(`.dy-macro-select[data-template="${escapeAttr(templateName)}"]`);
+                const macroName = selectElement.value;
+
+                if (!macroName) {
+                    notify('错误', '请选择一个宏');
+                    return;
+                }
+
+                // Add macro to template
+                if (!persistent[templateName]) {
+                    persistent[templateName] = { template: '', macros: [] };
+                }
+
+                if (!persistent[templateName].macros) {
+                    persistent[templateName].macros = [];
+                }
+
+                // Avoid duplicates
+                if (!persistent[templateName].macros.includes(macroName)) {
+                    persistent[templateName].macros.push(macroName);
+                    savePersistent();
+                    renderMacroLists(); // Refresh the lists
+                    notify('成功', `宏 "${macroName}" 已添加到模板 "${templateName}"`);
+                } else {
+                    notify('提示', `宏 "${macroName}" 已存在于模板 "${templateName}" 中`);
+                }
+            });
+        });
+
+        document.querySelectorAll('.dy-macro-clear-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const templateName = e.currentTarget.dataset.template;
+
+                if (confirm(`确定要清空 "${templateName}" 的所有宏吗？`)) {
+                    if (persistent[templateName]) {
+                        persistent[templateName].macros = [];
+                        savePersistent();
+                        renderMacroLists(); // Refresh the lists
+                        notify('成功', `模板 "${templateName}" 的宏已清空`);
+                    }
+                }
+            });
+        });
+    }
+
+    function saveMacroFromForm() {
+        const nameInput = document.getElementById('dy-macro-name');
+        const descInput = document.getElementById('dy-macro-desc');
+        const codeInput = document.getElementById('dy-macro-code');
+
+        const name = nameInput.value.trim();
+        const desc = descInput.value.trim();
+
+        // Get code from Monaco editor if available, otherwise from textarea
+        let code = '';
+        if (window.__dy_macro_monaco_editor && window.__dy_macro_monaco_editor.getModel) {
+            code = window.__dy_macro_monaco_editor.getModel().getValue();
+        } else {
+            code = codeInput.value.trim();
+        }
+
+        if (!name || !code) {
+            notify('错误', '宏名称和代码不能为空');
+            return;
+        }
+
+        // Check if macro exists to update or add new
+        if (macros[name]) {
+            updateMacro(name, code, desc, macros[name].enabled);
+            notify('成功', `宏 "${name}" 已更新`);
+        } else {
+            addMacro(name, code, desc);
+            notify('成功', `宏 "${name}" 已创建`);
+        }
+
+        // Refresh lists and clear form
+        renderMacroLists();
+        nameInput.value = '';
+        descInput.value = '';
+
+        // Clear both textarea and Monaco editor
+        codeInput.value = '';
+        if (window.__dy_macro_monaco_editor && window.__dy_macro_monaco_editor.getModel) {
+            window.__dy_macro_monaco_editor.getModel().setValue('');
+        }
+    }
 
     function saveScheduleFromUI() {
         const timeInput = document.getElementById('dy-schedule-time');
@@ -1327,15 +2185,38 @@
         }
     }
 
-    // 使用Jinja语法的模板引擎，支持$开头的占位符
-    function renderTemplate(tpl, ctx) {
+    // 支持$开头的占位符
+    function renderTemplate(tpl, ctx, targetName = null) {
         // 预处理变量
         let out = preprocessVariables(tpl, ctx.targetName || '');
 
         try {
-            // 将预处理后的代码直接视为JavaScript代码执行
-            const result = eval(`(function(){${out}})()`);
-            return result !== undefined ? String(result) : '';
+            // Execute macros associated with this specific template
+            let macroCode = '';
+            if (targetName && persistent[targetName] && persistent[targetName].macros) {
+                // Get macros associated with this specific template
+                const templateMacros = persistent[targetName].macros;
+                for (const macroName of templateMacros) {
+                    if (macros[macroName] && macros[macroName].code) {
+                        // Preprocess variables in macro code as well
+                        let processedMacroCode = preprocessVariables(macros[macroName].code, ctx.targetName || '');
+                        macroCode += processedMacroCode + ';';
+                    }
+                }
+            } else {
+                // Fallback: execute globally enabled macros (for backward compatibility)
+                for (const [name, macro] of Object.entries(macros)) {
+                    if (macro.enabled && macro.code) {
+                        // Preprocess variables in macro code as well
+                        let processedMacroCode = preprocessVariables(macro.code, ctx.targetName || '');
+                        macroCode += processedMacroCode + ';';
+                    }
+                }
+            }
+
+            // 将预处理后的代码直接视为JavaScript代码执行，先执行模板，再执行宏
+            const result = eval(`(function(){let res;${out};${macroCode};return res;})()`);
+            return result;
         } catch (e) {
             return '错误: ' + e.message;
         }
@@ -1447,10 +2328,28 @@
         }
     }
 
+    // 测试宏系统
+    function testMacroSystem() {
+        // Test that macros are properly integrated
+        console.log('Testing macro system...');
+        console.log('Current macros:', macros);
+        console.log('Current persistent data:', persistent);
+
+        // Test template rendering with macros
+        const testTemplate = 'return "Hello " + targetName;';
+        const context = { targetName: 'TestUser' };
+        const result = renderTemplate(testTemplate, context, 'TestUser');
+        console.log('Template result:', result);
+
+    }
+
     // 启动：加载持久化并创建面板，然后开始定期抓取
     function start() {
         loadPersistent();
+        loadMacros();
         loadSettings();
+
+
         renderPanel();
         // 初次抓取
         autoFetchChats();
@@ -1458,6 +2357,9 @@
         setInterval(autoFetchChats, 5000);
         // 启动 scheduler（若启用）
         if (settings.autoEnabled) startScheduler();
+
+        // Test the macro system
+        testMacroSystem();
     }
 
     // 全局快捷键菜单
