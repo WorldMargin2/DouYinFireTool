@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音火花助手
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
+// @version      1.0.1
 // @description  自动抓取聊天列表到暂存，支持将对象添加为续火花目标、每对象模板、$date/$targetName/$sinceDate()、简单条件语句。参考 fire.js 的选择器与发送逻辑。
 // @author       WorldMargin
 // @match        https://creator.douyin.com/creator-micro/data/following/chat
@@ -18,6 +18,8 @@
 
 (function() {
     'use strict';
+
+    const DEFAULT_TEMPLATE='res= \`自动续火花-$date\n$targetName\`';
 
     // 创建命名空间
     window.DyFireScript = window.DyFireScript || {};
@@ -58,7 +60,6 @@
     const KEY_PERSIST = 'dy_fire_persistent_targets_v1';
     const KEY_MACROS = 'dy_fire_macros_v1';
 
-    // 选择器参考自 fire.js
     const SELECTORS = {
         userName: '.item-header-name-vL_79m',
         chatInput: '.chat-input-dccKiL',
@@ -1779,7 +1780,7 @@
         const name = e.currentTarget.dataset.name;
         if (!name) return;
         if (!persistent[name]) {
-            persistent[name] = { template: 'return \`自动续火花-$date\n$targetName\`', macros: [] };
+            persistent[name] = { template: DEFAULT_TEMPLATE, macros: [] };
         }
         // 从暂存移除
         staged = staged.filter(n => n !== name);
@@ -1826,7 +1827,7 @@
     function onSendNow(e) {
         const name = e.currentTarget.dataset.name;
         if (!name) return;
-        const tpl = (persistent[name] && persistent[name].template) || 'return \`自动续火花-$date\n$targetName\`';
+        const tpl = (persistent[name] && persistent[name].template) || DEFAULT_TEMPLATE;
         const rendered = renderTemplate(tpl, { targetName: name }, name);
         sendToTarget(name, rendered).then(ok => {
             if (ok) {
@@ -2215,7 +2216,7 @@
             }
 
             // 将预处理后的代码直接视为JavaScript代码执行，先执行模板，再执行宏
-            const result = eval(`(function(){let res;${out};${macroCode};return res;})()`);
+            const result = eval(`(function(){let res="";${out};${macroCode};return res;})()`);
             return result;
         } catch (e) {
             return '错误: ' + e.message;
