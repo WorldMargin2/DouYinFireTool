@@ -68,7 +68,7 @@
 
     // 内存数据
     let staged = []; // 暂存数组 of {name}
-    let persistent = {}; // { name: { template: string, macros: [] } }
+    let persistent = {}; // { name: { template: string, macros: [], lastSendDate: string } }
     let activeEdit = null; // 当前编辑对象名
     let selectedSet = new Set(); // 选中用于批量发送的名字
     let macros = {}; // { name: { code: string, enabled: boolean, description: string } }
@@ -77,8 +77,9 @@
     let settings = {
         schedulerTime: '', // 'HH:MM'
         sendIntervalSec: 3,
-        autoEnabled: false
-        ,theme: 'dark'
+        autoEnabled: false,
+        sendMode: 'scheduled', // 'scheduled' or 'automatic'
+        theme: 'dark'
     };
     let schedulerTimer = null;
     let lastScheduledRun = '';
@@ -88,10 +89,13 @@
         try {
             persistent = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
-            // Ensure all templates have the macros array for backward compatibility
+            // Ensure all templates have the macros array and lastSendDate for backward compatibility
             for (const [name, templateData] of Object.entries(persistent)) {
                 if (!templateData.macros) {
                     templateData.macros = [];
+                }
+                if (!templateData.lastSendDate) {
+                    templateData.lastSendDate = '';
                 }
             }
         } catch (e) {
@@ -386,10 +390,13 @@
     }
 
     function savePersistent() {
-        // Ensure all templates have the macros array before saving
+        // Ensure all templates have the macros array and lastSendDate before saving
         for (const [name, templateData] of Object.entries(persistent)) {
             if (!templateData.macros) {
                 templateData.macros = [];
+            }
+            if (!templateData.lastSendDate) {
+                templateData.lastSendDate = '';
             }
         }
         GM_setValue(KEY_PERSIST, JSON.stringify(persistent));
@@ -487,6 +494,13 @@
                 </div>
                 <div class="dy-settings dy-settings-bottom">
                     <div class="dy-settings-row">
+                        <label>发送模式:</label>
+                        <select id="dy-send-mode" style="width:120px">
+                            <option value="scheduled">定时发送</option>
+                            <option value="automatic">自动发送</option>
+                        </select>
+                    </div>
+                    <div class="dy-settings-row" id="dy-schedule-time-row">
                         <label>定时发送 (每日 HH:MM):</label>
                         <input id="dy-schedule-time" type="time" />
                         <button id="dy-save-schedule" class="dy-btn">保存并启用</button>
@@ -1710,8 +1724,14 @@
         staged.forEach(name => {
             const li = document.createElement('li');
             li.className = 'dy-item';
+            // Check if this name is already in persistent storage (for consistency)
+            const targetData = persistent[name];
+            const lastSendDate = targetData && targetData.lastSendDate ? `上次发送: ${targetData.lastSendDate}` : '未发送';
             li.innerHTML = `
-                <div class="dy-item-top"><label><input class="dy-select-checkbox" type="checkbox" data-name="${escapeAttr(name)}" ${selectedSet.has(name) ? 'checked' : ''} /> <span class="dy-item-name">${escapeHtml(name)}</span></label></div>
+                <div class="dy-item-top">
+                    <label><input class="dy-select-checkbox" type="checkbox" data-name="${escapeAttr(name)}" ${selectedSet.has(name) ? 'checked' : ''} /> <span class="dy-item-name">${escapeHtml(name)}</span></label>
+                    <div class="dy-item-date" style="font-size:11px; color:#aaa; margin-top:4px;">${escapeHtml(lastSendDate)}</div>
+                </div>
                 <div class="dy-item-actions">
                     <button class="dy-btn dy-btn-add dy-btn-persist" data-name="${escapeAttr(name)}">添加目标</button>
                     <button class="dy-btn dy-btn-edit" data-name="${escapeAttr(name)}">模板</button>
@@ -1723,10 +1743,15 @@
 
         persistList.innerHTML = '';
         Object.keys(persistent).forEach(name => {
+            const targetData = persistent[name];
+            const lastSendDate = targetData.lastSendDate ? `上次发送: ${targetData.lastSendDate}` : '未发送';
             const li = document.createElement('li');
             li.className = 'dy-item';
             li.innerHTML = `
-                <div class="dy-item-top"><label><input class="dy-select-checkbox" type="checkbox" data-name="${escapeAttr(name)}" ${selectedSet.has(name) ? 'checked' : ''} /> <span class="dy-item-name">${escapeHtml(name)}</span></label></div>
+                <div class="dy-item-top">
+                    <label><input class="dy-select-checkbox" type="checkbox" data-name="${escapeAttr(name)}" ${selectedSet.has(name) ? 'checked' : ''} /> <span class="dy-item-name">${escapeHtml(name)}</span></label>
+                    <div class="dy-item-date" style="font-size:11px; color:#aaa; margin-top:4px;">${escapeHtml(lastSendDate)}</div>
+                </div>
                 <div class="dy-item-actions">
                     <button class="dy-btn dy-btn-remove dy-btn-unpersist" data-name="${escapeAttr(name)}">移除目标</button>
                     <button class="dy-btn dy-btn-edit" data-name="${escapeAttr(name)}">模板</button>
@@ -1755,6 +1780,28 @@
         if (toggleSchedulerBtn) toggleSchedulerBtn.onclick = toggleScheduler;
         const intervalInput = document.getElementById('dy-interval-sec');
         if (intervalInput) intervalInput.onchange = () => { settings.sendIntervalSec = Number(intervalInput.value) || 3; saveSettings(); };
+
+        // send mode selector
+        const sendModeSelect = document.getElementById('dy-send-mode');
+        if (sendModeSelect) {
+            sendModeSelect.value = settings.sendMode || 'scheduled';
+            sendModeSelect.onchange = () => {
+                settings.sendMode = sendModeSelect.value;
+                saveSettings();
+                updateSchedulerStatus();
+                // Show/hide schedule time input based on mode
+                const scheduleTimeRow = document.getElementById('dy-schedule-time-row');
+                if (scheduleTimeRow) {
+                    scheduleTimeRow.style.display = settings.sendMode === 'scheduled' ? 'flex' : 'none';
+                }
+            };
+            // Initialize visibility based on current mode
+            const scheduleTimeRow = document.getElementById('dy-schedule-time-row');
+            if (scheduleTimeRow) {
+                scheduleTimeRow.style.display = settings.sendMode === 'scheduled' ? 'flex' : 'none';
+            }
+        }
+
         // 初始化 UI 值
         const timeInput = document.getElementById('dy-schedule-time');
         if (timeInput) timeInput.value = settings.schedulerTime || '';
@@ -1780,7 +1827,7 @@
         const name = e.currentTarget.dataset.name;
         if (!name) return;
         if (!persistent[name]) {
-            persistent[name] = { template: DEFAULT_TEMPLATE, macros: [] };
+            persistent[name] = { template: DEFAULT_TEMPLATE, macros: [], lastSendDate: '' };
         }
         // 从暂存移除
         staged = staged.filter(n => n !== name);
@@ -1812,11 +1859,13 @@
             const editorText = document.getElementById('dy-modal-editor-text') || document.getElementById('dy-editor-text');
             tpl = (editorText && editorText.value) ? editorText.value : '';
         }
-        if (!persistent[activeEdit]) persistent[activeEdit] = { template: tpl, macros: [] };
+        if (!persistent[activeEdit]) persistent[activeEdit] = { template: tpl, macros: [], lastSendDate: '' };
         else {
             persistent[activeEdit].template = tpl;
             // Ensure macros array exists
             if (!persistent[activeEdit].macros) persistent[activeEdit].macros = [];
+            // Ensure lastSendDate exists
+            if (!persistent[activeEdit].lastSendDate) persistent[activeEdit].lastSendDate = '';
         }
         savePersistent();
         renderLists();
@@ -1831,7 +1880,14 @@
         const rendered = renderTemplate(tpl, { targetName: name }, name);
         sendToTarget(name, rendered).then(ok => {
             if (ok) {
+                // Update lastSendDate if in automatic mode
+                if (settings.sendMode === 'automatic') {
+                    persistent[name].lastSendDate = new Date().toDateString();
+                    savePersistent();
+                }
                 notify('发送成功', name + ' 已发送');
+                // Refresh the UI to show updated status
+                renderLists();
             } else {
                 notify('发送失败', '请检查页面或稍后重试');
             }
@@ -1869,11 +1925,18 @@
             const tpl = (persistent[name] && persistent[name].template) || 'return \`自动续火花-$date\n$targetName\`';
             const rendered = renderTemplate(tpl, { targetName: name }, name);
             const ok = await sendToTarget(name, rendered);
+            if (ok && settings.sendMode === 'automatic') {
+                // Update lastSendDate for automatic mode
+                persistent[name].lastSendDate = new Date().toDateString();
+                savePersistent();
+            }
             if (statusEl) statusEl.textContent = `发送中: ${i+1}/${names.length}`;
             await sleep((settings.sendIntervalSec || 3) * 1000);
         }
         if (statusEl) statusEl.textContent = `上次批量完成: ${new Date().toLocaleTimeString()}`;
         notify('批量发送完成', `共 ${names.length} 条`);
+        // Refresh the UI to show updated status
+        renderLists();
     }
 
     function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
@@ -2137,13 +2200,21 @@
 
     function saveScheduleFromUI() {
         const timeInput = document.getElementById('dy-schedule-time');
-        if (!timeInput) return;
+        const sendModeSelect = document.getElementById('dy-send-mode');
+        if (!timeInput || !sendModeSelect) return;
+
         settings.schedulerTime = timeInput.value || '';
+        settings.sendMode = sendModeSelect.value || 'scheduled';
         settings.autoEnabled = true;
         saveSettings();
         startScheduler();
         updateSchedulerStatus();
-        notify('已保存定时', `每天 ${settings.schedulerTime} 将批量发送续火花目标`);
+
+        if (settings.sendMode === 'scheduled') {
+            notify('已保存定时', `每天 ${settings.schedulerTime} 将批量发送续火花目标`);
+        } else if (settings.sendMode === 'automatic') {
+            notify('已启用自动发送', `将自动检查并发送给未发送的联系人`);
+        }
     }
 
     function toggleScheduler() {
@@ -2157,7 +2228,17 @@
         const statusEl = document.getElementById('dy-scheduler-status');
         const toggleBtn = document.getElementById('dy-toggle-scheduler');
         if (!statusEl || !toggleBtn) return;
-        statusEl.textContent = settings.autoEnabled ? `定时启用：${settings.schedulerTime || '(无时间)'}，间隔 ${settings.sendIntervalSec}s` : '定时未启用';
+
+        if (settings.autoEnabled) {
+            if (settings.sendMode === 'scheduled') {
+                statusEl.textContent = `定时启用：${settings.schedulerTime || '(无时间)'}，间隔 ${settings.sendIntervalSec}s`;
+            } else if (settings.sendMode === 'automatic') {
+                statusEl.textContent = `自动发送启用，间隔 ${settings.sendIntervalSec}s`;
+            }
+        } else {
+            statusEl.textContent = '定时未启用';
+        }
+
         toggleBtn.textContent = settings.autoEnabled ? '禁用定时' : '启用定时';
     }
 
@@ -2173,16 +2254,47 @@
     }
 
     function schedulerTick() {
-        if (!settings.autoEnabled || !settings.schedulerTime) return;
+        if (!settings.autoEnabled) return;
+
         const now = new Date();
+        const currentDate = now.toDateString();
         const hh = String(now.getHours()).padStart(2,'0');
         const mm = String(now.getMinutes()).padStart(2,'0');
         const cur = `${hh}:${mm}`;
-        if (cur === settings.schedulerTime && lastScheduledRun !== new Date().toDateString()) {
-            lastScheduledRun = new Date().toDateString();
-            // 执行批量发送：续火花目标列表
+
+        // Check if we're in scheduled mode
+        if (settings.sendMode === 'scheduled') {
+            if (settings.schedulerTime && cur === settings.schedulerTime && lastScheduledRun !== currentDate) {
+                lastScheduledRun = currentDate;
+                // 执行批量发送：续火花目标列表
+                const names = Object.keys(persistent);
+                if (names.length > 0) batchSend(names);
+            }
+        }
+        // Check if we're in automatic mode
+        else if (settings.sendMode === 'automatic') {
+            // Check each target to see if it needs to be sent to today
             const names = Object.keys(persistent);
-            if (names.length > 0) batchSend(names);
+            const targetsToSend = [];
+
+            for (const name of names) {
+                const targetData = persistent[name];
+                // If lastSendDate is not today, add to targets to send
+                if (targetData.lastSendDate !== currentDate) {
+                    targetsToSend.push(name);
+                }
+            }
+
+            if (targetsToSend.length > 0) {
+                // Update lastSendDate for all targets that will be sent
+                for (const name of targetsToSend) {
+                    persistent[name].lastSendDate = currentDate;
+                }
+                savePersistent();
+
+                // Send to all targets that need to be sent
+                batchSend(targetsToSend);
+            }
         }
     }
 
@@ -2344,6 +2456,31 @@
 
     }
 
+    // 测试自动发送功能
+    function testAutoSendFeature() {
+        console.log('Testing auto send feature...');
+        console.log('Current settings:', settings);
+        console.log('Current persistent data structure:', persistent);
+
+        // Test that all persistent entries have lastSendDate
+        for (const [name, data] of Object.entries(persistent)) {
+            if (!data.hasOwnProperty('lastSendDate')) {
+                console.error(`Missing lastSendDate for ${name}`);
+            } else {
+                console.log(`${name} lastSendDate: ${data.lastSendDate}`);
+            }
+        }
+
+        // Test date comparison logic
+        const today = new Date().toDateString();
+        console.log('Today is:', today);
+
+        // Test scheduler tick logic
+        console.log('Testing scheduler tick with current settings...');
+        console.log('Send mode:', settings.sendMode);
+        console.log('Auto enabled:', settings.autoEnabled);
+    }
+
     // 启动：加载持久化并创建面板，然后开始定期抓取
     function start() {
         loadPersistent();
@@ -2361,6 +2498,8 @@
 
         // Test the macro system
         testMacroSystem();
+        // Test the new auto send feature
+        testAutoSendFeature();
     }
 
     // 全局快捷键菜单
