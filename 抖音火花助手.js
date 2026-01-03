@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音火花助手
 // @namespace    http://tampermonkey.net/
-// @version      1.0.1
+// @version      1.0.2
 // @description  自动抓取聊天列表到暂存，支持将对象添加为续火花目标、每对象模板、$date/$targetName/$sinceDate()、简单条件语句。参考 fire.js 的选择器与发送逻辑。
 // @author       WorldMargin
 // @match        https://creator.douyin.com/creator-micro/data/following/chat
