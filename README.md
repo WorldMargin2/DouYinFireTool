@@ -138,6 +138,13 @@ if(15<=t){
 
 ## 更新日志
 
+
+### v1.0.3 (2026-01-04)
+- **修正了作者GitHub项目地址**：不小心写少了，我就说怎么死活进不去：
+  `https://github.com/WordlMargin/DouyinFireTool`
+  -------------------------------------------↓
+  `https://github.com/WordlMargin2/DouyinFireTool`
+
 ### v1.0.2 (2026-01-03)
 - **修复了一些已知问题**：
   - 修复了由于原来的eval函数内`let res`与一般逻辑:`res+=xxx`导致结果前出现undefined的问题；解决方案：将`let res`改为`let res=""`
