@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音火花助手
 // @namespace    http://tampermonkey.net/
-// @version      1.0.4
+// @version      1.0.5
 // @description  自动抓取聊天列表到暂存，支持将对象添加为续火花目标、每对象模板、$date/$targetName/$sinceDate()、简单条件语句。参考 fire.js 的选择器与发送逻辑。
 // @author       WorldMargin
 // @match        https://creator.douyin.com/creator-micro/data/following/chat
@@ -12,8 +12,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getResourceText
 // @grant        GM_addStyle
-// @homepage   				https://github.com/WordlMargin2/DouYinFireTool
-// @source     				https://github.com/WordlMargin2/DouYinFireTool/抖音火花助手.js
+// @homepage   				https://github.com/WorldMargin2/DouYinFireTool
+// @source     				https://raw.githubusercontent.com/WorldMargin2/DouYinFireTool/refs/heads/main/抖音火花助手.js
 // ==/UserScript==
 
 (function() {
@@ -64,16 +64,23 @@
         userName: '.item-header-name-vL_79m',
         chatInput: '.chat-input-dccKiL',
         sendBtn: '.chat-btn',
+        chatTabs: '.sub-tab-mspQQ0',
+        friendTab: '.sub-tab-mspQQ0 span:nth-child(1)',  // 朋友私信
+        strangerTab: '.sub-tab-mspQQ0 span:nth-child(2)', // 陌生人私信
+        groupTab: '.sub-tab-mspQQ0 span:nth-child(3)',    // 群消息
     };
 
     // 内存数据
     let staged = []; // 暂存数组 of {name}
+    let stagedWithTypes = new Map(); // Map of {name -> chatType} to track where each contact was found
     let persistent = {}; // { name: { template: string, macros: [], lastSendDate: string } }
     let activeEdit = null; // 当前编辑对象名
     let selectedSet = new Set(); // 选中用于批量发送的名字
     let macros = {}; // { name: { code: string, enabled: boolean, description: string } }
 
     const KEY_SETTINGS = 'dy_fire_settings_v1';
+    const KEY_CHAT_TYPES = 'dy_fire_chat_types_v1'; // 新增：存储聊天类型信息
+
     let settings = {
         schedulerTime: '', // 'HH:MM'
         sendIntervalSec: 3,
@@ -433,26 +440,201 @@
         GM_setValue(KEY_SETTINGS, JSON.stringify(settings));
     }
 
+    // Save chat types
+    function saveChatTypes() {
+        const chatTypesObj = Object.fromEntries(stagedWithTypes);
+        GM_setValue(KEY_CHAT_TYPES, JSON.stringify(chatTypesObj));
+    }
+
+    // Load chat types
+    function loadChatTypes() {
+        const raw = GM_getValue(KEY_CHAT_TYPES, '{}');
+        try {
+            const chatTypesObj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            stagedWithTypes = new Map(Object.entries(chatTypesObj));
+        } catch (e) {
+            stagedWithTypes = new Map();
+        }
+    }
+
+    // 用于跟踪是否已经执行过完整的多标签页抓取
+    let hasDoneInitialMultiTabFetch = false;
+
     // 自动抓取聊天列表到暂存（不加入已为续火花目标的对象）
-    function autoFetchChats() {
-        const els = document.querySelectorAll(SELECTORS.userName);
-        const names = [];
-        els.forEach(el => {
-            const name = el.textContent && el.textContent.trim();
-            if (name) names.push(name);
-        });
+    async function autoFetchChats(isPeriodic = false) {
+        // 如果是周期性调用且已经完成过初始多标签页抓取，则只在当前标签页查找
+        if (isPeriodic && hasDoneInitialMultiTabFetch) {
+            // 只在当前标签页查找用户
+            const els = document.querySelectorAll(SELECTORS.userName);
+            const names = [];
+            els.forEach(el => {
+                const name = el.textContent && el.textContent.trim();
+                if (name) names.push(name);
+            });
 
-        let added = 0;
-        names.forEach(name => {
-            if (persistent[name]) return; // 已为续火花目标则忽略
-            if (!staged.includes(name)) {
-                staged.push(name);
-                added++;
+            let added = 0;
+            names.forEach(name => {
+                if (persistent[name]) return; // 已为续火花目标则忽略
+                if (!staged.includes(name)) {
+                    staged.push(name);
+                    // Try to determine the current tab to set the correct type
+                    // For now, we'll default to friend, but in a real implementation
+                    // we would detect which tab is currently active
+                    const currentTabType = determineCurrentTabType();
+                    stagedWithTypes.set(name, currentTabType);
+                    added++;
+                }
+            });
+
+            if (added > 0) {
+                renderPanel();
+                saveChatTypes(); // Save chat types when new contacts are added
             }
-        });
+            return;
+        }
 
-        if (added > 0) {
-            renderPanel();
+        // 如果还没有执行过多标签页抓取，或者不是周期性调用，则执行完整流程
+        if (!hasDoneInitialMultiTabFetch) {
+            hasDoneInitialMultiTabFetch = true;
+        }
+
+        try {
+            // 首先尝试点击朋友私信标签页
+            const friendTab = document.querySelector(SELECTORS.friendTab);
+            if (friendTab) {
+                friendTab.click();
+                await waitForPageLoadShort();
+
+                const els = document.querySelectorAll(SELECTORS.userName);
+                const names = [];
+                els.forEach(el => {
+                    const name = el.textContent && el.textContent.trim();
+                    if (name) names.push(name);
+                });
+
+                let added = 0;
+                names.forEach(name => {
+                    if (persistent[name]) return; // 已为续火花目标则忽略
+                    if (!staged.includes(name)) {
+                        staged.push(name);
+                        stagedWithTypes.set(name, 'friend'); // Friends tab
+                        added++;
+                    }
+                });
+
+                if (added > 0) {
+                    renderPanel();
+                    saveChatTypes(); // Save chat types when new contacts are added
+                }
+
+                // 现在也获取陌生人和群聊的消息
+                await fetchOtherChatTypes();
+            } else {
+                // 如果没有标签页，则按原来的方式处理
+                const els = document.querySelectorAll(SELECTORS.userName);
+                const names = [];
+                els.forEach(el => {
+                    const name = el.textContent && el.textContent.trim();
+                    if (name) names.push(name);
+                });
+
+                let added = 0;
+                names.forEach(name => {
+                    if (persistent[name]) return; // 已为续火花目标则忽略
+                    if (!staged.includes(name)) {
+                        staged.push(name);
+                        stagedWithTypes.set(name, 'friend'); // Friends tab
+                        added++;
+                    }
+                });
+
+                if (added > 0) {
+                    renderPanel();
+                    saveChatTypes(); // Save chat types when new contacts are added
+                }
+            }
+        } catch (error) {
+            console.error('Error in autoFetchChats:', error);
+        }
+    }
+
+    // 获取其他类型聊天（陌生人、群聊）
+    async function fetchOtherChatTypes() {
+        try {
+            // 获取陌生人消息
+            const strangerTab = document.querySelector(SELECTORS.strangerTab);
+            if (strangerTab) {
+                strangerTab.click();
+                await waitForPageLoadShort();
+
+                const strangerEls = document.querySelectorAll(SELECTORS.userName);
+                const strangerNames = [];
+                strangerEls.forEach(el => {
+                    const name = el.textContent && el.textContent.trim();
+                    if (name) strangerNames.push(name);
+                });
+
+                let added = 0;
+                strangerNames.forEach(name => {
+                    if (persistent[name]) return; // 已为续火花目标则忽略
+                    if (!staged.includes(name)) {
+                        staged.push(name);
+                        stagedWithTypes.set(name, 'stranger'); // Stranger tab
+                        added++;
+                    }
+                });
+
+                if (added > 0) {
+                    renderPanel();
+                    saveChatTypes(); // Save chat types when new contacts are added
+                }
+            }
+
+            // 获取群聊消息
+            await fetchGroupChats();
+        } catch (error) {
+            console.error('Error in fetchOtherChatTypes:', error);
+        }
+    }
+
+    // 获取群聊消息
+    async function fetchGroupChats() {
+        try {
+            const groupTab = document.querySelector(SELECTORS.groupTab);
+            if (groupTab) {
+                groupTab.click();
+                await waitForPageLoadShort();
+
+                const groupEls = document.querySelectorAll(SELECTORS.userName);
+                const groupNames = [];
+                groupEls.forEach(el => {
+                    const name = el.textContent && el.textContent.trim();
+                    if (name) groupNames.push(name);
+                });
+
+                let added = 0;
+                groupNames.forEach(name => {
+                    if (persistent[name]) return; // 已为续火花目标则忽略
+                    if (!staged.includes(name)) {
+                        staged.push(name);
+                        stagedWithTypes.set(name, 'group'); // Group tab
+                        added++;
+                    }
+                });
+
+                if (added > 0) {
+                    renderPanel();
+                    saveChatTypes(); // Save chat types when new contacts are added
+                }
+            }
+        } catch (error) {
+            console.error('Error in fetchGroupChats:', error);
+        } finally {
+            // 最后回到朋友私信标签页
+            const friendTab = document.querySelector(SELECTORS.friendTab);
+            if (friendTab) {
+                friendTab.click();
+            }
         }
     }
 
@@ -484,7 +666,10 @@
                 <div class="dy-body">
                     <div class="dy-column dy-staged">
                         <div class="dy-title">暂存列表</div>
-                        <div class="dy-select-all"><label><input type="checkbox" id="dy-select-all"/> 全选/反选</label></div>
+                        <div class="dy-select-all">
+                            <label><input type="checkbox" id="dy-select-all"/> 全选/反选</label>
+                            <button id="dy-select-added-targets" class="dy-btn dy-btn-light" style="margin-left: 10px; padding: 4px 8px; font-size: 11px;">已添加目标全选</button>
+                        </div>
                         <ul id="dy-staged-list" class="dy-list"></ul>
                     </div>
                     <div class="dy-column dy-persist">
@@ -1095,7 +1280,7 @@
                     updateModalPreview();
                 };
 
-                // 移除旧的监听器（如果存在）
+                // 移除�����的监听器（如果存在）
                 if (window.__dy_monaco_editor._changeDisposable) {
                     window.__dy_monaco_editor._changeDisposable.dispose();
                 }
@@ -1722,6 +1907,11 @@
 
         stagedList.innerHTML = '';
         staged.forEach(name => {
+            // Determine chat type and assign color
+            const chatType = determineChatType(name);
+            const typeLabel = getChatTypeLabel(chatType);
+            const typeColor = getChatTypeColor(chatType);
+
             const li = document.createElement('li');
             li.className = 'dy-item';
             // Check if this name is already in persistent storage (for consistency)
@@ -1729,7 +1919,7 @@
             const lastSendDate = targetData && targetData.lastSendDate ? `上次发送: ${targetData.lastSendDate}` : '未发送';
             li.innerHTML = `
                 <div class="dy-item-top">
-                    <label><input class="dy-select-checkbox" type="checkbox" data-name="${escapeAttr(name)}" ${selectedSet.has(name) ? 'checked' : ''} /> <span class="dy-item-name">${escapeHtml(name)}</span></label>
+                    <label><input class="dy-select-checkbox" type="checkbox" data-name="${escapeAttr(name)}" ${selectedSet.has(name) ? 'checked' : ''} /> <span class="dy-item-name">${escapeHtml(name)}</span> <span class="chat-type-label" style="background:${typeColor};color:white;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:5px;">${typeLabel}</span></label>
                     <div class="dy-item-date" style="font-size:11px; color:#aaa; margin-top:4px;">${escapeHtml(lastSendDate)}</div>
                 </div>
                 <div class="dy-item-actions">
@@ -1743,13 +1933,18 @@
 
         persistList.innerHTML = '';
         Object.keys(persistent).forEach(name => {
+            // Determine chat type and assign color for persistent items too
+            const chatType = determineChatType(name);
+            const typeLabel = getChatTypeLabel(chatType);
+            const typeColor = getChatTypeColor(chatType);
+
             const targetData = persistent[name];
             const lastSendDate = targetData.lastSendDate ? `上次发送: ${targetData.lastSendDate}` : '未发送';
             const li = document.createElement('li');
             li.className = 'dy-item';
             li.innerHTML = `
                 <div class="dy-item-top">
-                    <label><input class="dy-select-checkbox" type="checkbox" data-name="${escapeAttr(name)}" ${selectedSet.has(name) ? 'checked' : ''} /> <span class="dy-item-name">${escapeHtml(name)}</span></label>
+                    <label><input class="dy-select-checkbox" type="checkbox" data-name="${escapeAttr(name)}" ${selectedSet.has(name) ? 'checked' : ''} /> <span class="dy-item-name">${escapeHtml(name)}</span> <span class="chat-type-label" style="background:${typeColor};color:white;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:5px;">${typeLabel}</span></label>
                     <div class="dy-item-date" style="font-size:11px; color:#aaa; margin-top:4px;">${escapeHtml(lastSendDate)}</div>
                 </div>
                 <div class="dy-item-actions">
@@ -1769,7 +1964,39 @@
         // checkbox 事件
         document.querySelectorAll('.dy-select-checkbox').forEach(cb => cb.addEventListener('change', onSelectToggle));
         const selectAll = document.getElementById('dy-select-all');
-        if (selectAll) selectAll.onchange = onSelectAll;
+        if (selectAll) {
+            // Update selectAll handler to include the new functionality
+            selectAll.onchange = function(e) {
+                const checked = e.target.checked;
+                document.querySelectorAll('.dy-select-checkbox').forEach(cb => {
+                    cb.checked = checked;
+                    const name = cb.dataset.name;
+                    if (checked) selectedSet.add(name);
+                    else selectedSet.delete(name);
+                });
+            };
+        }
+
+        // Add event for the new "Select all added targets" button
+        const selectAddedTargets = document.getElementById('dy-select-added-targets');
+        if (selectAddedTargets) {
+            selectAddedTargets.onclick = function() {
+                // Clear current selection
+                selectedSet.clear();
+
+                // Select all checkboxes for items in persistent (added targets)
+                document.querySelectorAll('.dy-select-checkbox').forEach(cb => {
+                    const name = cb.dataset.name;
+                    if (persistent[name]) { // If it's in persistent, it's an added target
+                        cb.checked = true;
+                        selectedSet.add(name);
+                    } else {
+                        cb.checked = false;
+                    }
+                });
+            };
+        }
+
         // 批量发送按钮
         const batchBtn = document.getElementById('dy-batch-send');
         if (batchBtn) batchBtn.onclick = batchSendSelected;
@@ -1823,6 +2050,56 @@
         renderMacroLists();
     }
 
+    // Helper function to determine chat type based on context
+    function determineChatType(name) {
+        // Check if we have stored the chat type for this name
+        if (stagedWithTypes.has(name)) {
+            return stagedWithTypes.get(name);
+        }
+
+        // If not found in staged types, it might be a persistent contact
+        // In this case, we could try to determine from other sources if needed
+        // For now, return default
+        return 'friend'; // Default fallback
+    }
+
+    // Helper function to get chat type label
+    function getChatTypeLabel(type) {
+        switch(type) {
+            case 'group': return '群聊';
+            case 'stranger': return '陌生人';
+            case 'friend':
+            default: return '朋友';
+        }
+    }
+
+    // Helper function to get chat type color
+    function getChatTypeColor(type) {
+        switch(type) {
+            case 'group': return '#3b82f6'; // Blue for group
+            case 'stranger': return '#f59e0b'; // Amber for stranger
+            case 'friend':
+            default: return '#10b981'; // Green for friend
+        }
+    }
+
+    // Helper function to determine current active tab type
+    function determineCurrentTabType() {
+        try {
+            // Check which tab is currently active by checking for active class or similar indicators
+            const friendTab = document.querySelector(SELECTORS.friendTab);
+            const strangerTab = document.querySelector(SELECTORS.strangerTab);
+            const groupTab = document.querySelector(SELECTORS.groupTab);
+
+            // This is a simplified detection - in practice, you'd check for active state classes
+            // For now, we'll just return 'friend' as default for periodic checks
+            // A more sophisticated implementation would check actual active states
+            return 'friend';
+        } catch (e) {
+            return 'friend'; // Default fallback
+        }
+    }
+
     function onPersist(e) {
         const name = e.currentTarget.dataset.name;
         if (!name) return;
@@ -1831,7 +2108,9 @@
         }
         // 从暂存移除
         staged = staged.filter(n => n !== name);
+        // 保留类型信息，即使在persistent列表中也需要显示类型
         savePersistent();
+        saveChatTypes(); // Save the chat types
         renderLists();
     }
 
@@ -1840,6 +2119,7 @@
         if (!name) return;
         delete persistent[name];
         savePersistent();
+        saveChatTypes(); // Save the chat types
         renderLists();
     }
 
@@ -2379,7 +2659,40 @@
 
     async function sendToTarget(name, message) {
         try {
-            const el = findUserElementByName(name);
+            // 首先尝试在当前标签页查找用户
+            let el = findUserElementByName(name);
+
+            // 如果没找到，尝试切换到不同的标签页查找
+            if (!el) {
+                // 尝试在陌生人标签页查找
+                const strangerTab = document.querySelector(SELECTORS.strangerTab);
+                if (strangerTab) {
+                    strangerTab.click();
+                    await waitForPageLoadShort();
+                    el = findUserElementByName(name);
+                }
+            }
+
+            if (!el) {
+                // 尝试在群聊标签页查找
+                const groupTab = document.querySelector(SELECTORS.groupTab);
+                if (groupTab) {
+                    groupTab.click();
+                    await waitForPageLoadShort();
+                    el = findUserElementByName(name);
+                }
+            }
+
+            if (!el) {
+                // 最后回到朋友标签页再找一次
+                const friendTab = document.querySelector(SELECTORS.friendTab);
+                if (friendTab) {
+                    friendTab.click();
+                    await waitForPageLoadShort();
+                    el = findUserElementByName(name);
+                }
+            }
+
             if (!el) return false;
 
             // 点击目标
@@ -2486,13 +2799,16 @@
         loadPersistent();
         loadMacros();
         loadSettings();
+        loadChatTypes(); // Load chat type information
 
 
         renderPanel();
-        // 初次抓取
-        autoFetchChats();
-        // 定时抓取以应对DOM变化
-        setInterval(autoFetchChats, 5000);
+        // 初次获取
+        autoFetchChats(); // Note: Not awaiting here to maintain original startup behavior
+        // 定时抓取以应对DOM变化 - 使用防抖版本
+        setInterval(async () => {
+            await autoFetchChats(true); // Pass true to indicate this is a periodic call
+        }, 5000);
         // 启动 scheduler（若启用）
         if (settings.autoEnabled) startScheduler();
 
