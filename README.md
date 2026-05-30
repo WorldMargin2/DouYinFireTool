@@ -56,6 +56,9 @@
 - 需要安装Tampermonkey或类似用户脚本管理器
 
 ## 更新日志
+### v1.0.6 (2026-05-30)
+- ** 将项目由`DouyinFireTool`迁移至`DouYinSpark`**
+
 
 ### v1.0.5 (2026-01-17)
 - **新增粗略匹配以解决无法自动为群聊发消息的问题**
@@ -64,17 +67,7 @@
 
 - **新增已添加目标一键全选功能**
 
-### v1.0.4 (2026-01-06)
-- **又错了......**
-  - **修正了作者GitHub项目地址**：
-    `https://github.com/WordlMargin2/DouyinFireTool`
-    `https://github.com/WordlMargin2/DouYinFireTool`
 
-### v1.0.3 (2026-01-06)
-
-- **修正了作者GitHub项目地址**：不小心写少了，我就说怎么死活进不去：
-  `https://github.com/WordlMargin/DouyinFireTool`
-  `https://github.com/WordlMargin2/DouyinFireTool`
 
 ### v1.0.2 (2026-01-03)
 

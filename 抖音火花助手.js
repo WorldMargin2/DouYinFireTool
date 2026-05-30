@@ -12,8 +12,8 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getResourceText
 // @grant        GM_addStyle
-// @homepage   				https://github.com/WorldMargin2/DouYinFireTool
-// @source     				https://raw.githubusercontent.com/WorldMargin2/DouYinFireTool/refs/heads/main/抖音火花助手.js
+// @homepage   				https://github.com/WorldMargin2/DouYinSpark
+// @source     				https://raw.githubusercontent.com/WorldMargin2/DouYinSpark/refs/heads/main/抖音火花助手.js
 // ==/UserScript==
 
 (function() {
@@ -22,7 +22,7 @@
     const DEFAULT_TEMPLATE='res= \`自动续火花-$date\n$targetName\`';
 
     // 创建命名空间
-    window.DyFireScript = window.DyFireScript || {};
+    window.DouYinSpark = window.DouYinSpark || {};
     // 预处理变量函数，用于替换编辑器中的变量
     function preprocessVariables(code, targetName) {
         let processedCode = code;
@@ -56,18 +56,27 @@
     }
 
 
-    // 存储键
-    const KEY_PERSIST = 'dy_fire_persistent_targets_v1';
-    const KEY_MACROS = 'dy_fire_macros_v1';
+    // 存储键 - 新命名空间
+    const KEY_PERSIST = 'douyin_spark_persistent_targets_v1';
+    const KEY_MACROS = 'douyin_spark_macros_v1';
+
+    // 旧存储键 - 用于数据迁移
+    const OLD_KEY_PERSIST = 'dy_fire_persistent_targets_v1';
+    const OLD_KEY_MACROS = 'dy_fire_macros_v1';
+
+    //聊天对象列表
+    //.ReactVirtualized__Grid__innerScrollContainer  (非动态类名)
+
 
     const SELECTORS = {
-        userName: '.item-header-name-vL_79m',
-        chatInput: '.chat-input-dccKiL',
-        sendBtn: '.chat-btn',
-        chatTabs: '.sub-tab-mspQQ0',
-        friendTab: '.sub-tab-mspQQ0 span:nth-child(1)',  // 朋友私信
-        strangerTab: '.sub-tab-mspQQ0 span:nth-child(2)', // 陌生人私信
-        groupTab: '.sub-tab-mspQQ0 span:nth-child(3)',    // 群消息
+        chatListContainer: '.ReactVirtualized__Grid__innerScrollContainer',
+        userName: '[class*=item-header-name-]',
+        chatInput: '[class*=chat-input-]',
+        sendBtn: '[class*=chat-btn]',
+        chatTabs: 'class*=[sub-tab-]',
+        friendTab: '[class*=sub-tab-] span:nth-child(1)',  // 朋友私信
+        strangerTab: '[class*=sub-tab-] span:nth-child(2)', // 陌生人私信
+        groupTab: '[class*=sub-tab-] span:nth-child(3)',    // 群消息
     };
 
     // 内存数据
@@ -78,8 +87,12 @@
     let selectedSet = new Set(); // 选中用于批量发送的名字
     let macros = {}; // { name: { code: string, enabled: boolean, description: string } }
 
-    const KEY_SETTINGS = 'dy_fire_settings_v1';
-    const KEY_CHAT_TYPES = 'dy_fire_chat_types_v1'; // 新增：存储聊天类型信息
+    const KEY_SETTINGS = 'douyin_spark_settings_v1';
+    const KEY_CHAT_TYPES = 'douyin_spark_chat_types_v1';
+
+    // 旧设置键 - 用于数据迁移
+    const OLD_KEY_SETTINGS = 'dy_fire_settings_v1';
+    const OLD_KEY_CHAT_TYPES = 'dy_fire_chat_types_v1';
 
     let settings = {
         schedulerTime: '', // 'HH:MM'
@@ -92,7 +105,33 @@
     let lastScheduledRun = '';
 
     function loadPersistent() {
-        const raw = GM_getValue(KEY_PERSIST, '{}');
+        // 尝试从新键加载数据
+        let raw = GM_getValue(KEY_PERSIST, null);
+        
+        // 如果新键没有数据，尝试从旧键迁移
+        if (raw === null || raw === undefined || raw === '{}') {
+            const oldRaw = GM_getValue(OLD_KEY_PERSIST, '{}');
+            if (oldRaw && oldRaw !== '{}' && oldRaw !== 'null' && oldRaw !== 'undefined') {
+                // 检测到旧数据，执行迁移
+                try {
+                    const oldData = typeof oldRaw === 'string' ? JSON.parse(oldRaw) : oldRaw;
+                    if (Object.keys(oldData).length > 0) {
+                        raw = oldRaw;
+                        // 将旧数据写入新键
+                        GM_setValue(KEY_PERSIST, raw);
+                        console.log('[DouYinSpark] 数据迁移成功：从 dy_fire_persistent_targets_v1 迁移到 douyin_spark_persistent_targets_v1');
+                    }
+                } catch (e) {
+                    console.error('[DouYinSpark] 数据迁移失败:', e);
+                    raw = '{}';
+                }
+            }
+        }
+        
+        if (raw === null || raw === undefined) {
+            raw = '{}';
+        }
+        
         try {
             persistent = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
@@ -410,7 +449,32 @@
     }
 
     function loadMacros() {
-        const raw = GM_getValue(KEY_MACROS, '{}');
+        // 尝试从新键加载数据
+        let raw = GM_getValue(KEY_MACROS, null);
+        
+        // 如果新键没有数据，尝试从旧键迁移
+        if (raw === null || raw === undefined || raw === '{}') {
+            const oldRaw = GM_getValue(OLD_KEY_MACROS, '{}');
+            if (oldRaw && oldRaw !== '{}' && oldRaw !== 'null' && oldRaw !== 'undefined') {
+                try {
+                    const oldData = typeof oldRaw === 'string' ? JSON.parse(oldRaw) : oldRaw;
+                    if (Object.keys(oldData).length > 0) {
+                        raw = oldRaw;
+                        // 将旧数据写入新键
+                        GM_setValue(KEY_MACROS, raw);
+                        console.log('[DouYinSpark] 数据迁移成功：从 dy_fire_macros_v1 迁移到 douyin_spark_macros_v1');
+                    }
+                } catch (e) {
+                    console.error('[DouYinSpark] 数据迁移失败:', e);
+                    raw = '{}';
+                }
+            }
+        }
+        
+        if (raw === null || raw === undefined) {
+            raw = '{}';
+        }
+        
         try {
             macros = typeof raw === 'string' ? JSON.parse(raw) : raw;
 
@@ -430,7 +494,27 @@
     }
 
     function loadSettings() {
-        const raw = GM_getValue(KEY_SETTINGS, null);
+        // 尝试从新键加载数据
+        let raw = GM_getValue(KEY_SETTINGS, null);
+        
+        // 如果新键没有数据，尝试从旧键迁移
+        if (raw === null || raw === undefined) {
+            const oldRaw = GM_getValue(OLD_KEY_SETTINGS, null);
+            if (oldRaw && oldRaw !== 'null' && oldRaw !== 'undefined') {
+                try {
+                    const oldData = typeof oldRaw === 'string' ? JSON.parse(oldRaw) : oldRaw;
+                    if (Object.keys(oldData).length > 0) {
+                        raw = oldRaw;
+                        // 将旧数据写入新键
+                        GM_setValue(KEY_SETTINGS, raw);
+                        console.log('[DouYinSpark] 数据迁移成功：从 dy_fire_settings_v1 迁移到 douyin_spark_settings_v1');
+                    }
+                } catch (e) {
+                    console.error('[DouYinSpark] 数据迁移失败:', e);
+                }
+            }
+        }
+        
         if (raw) {
             try { settings = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (e) {}
         }
@@ -448,7 +532,32 @@
 
     // Load chat types
     function loadChatTypes() {
-        const raw = GM_getValue(KEY_CHAT_TYPES, '{}');
+        // 尝试从新键加载数据
+        let raw = GM_getValue(KEY_CHAT_TYPES, null);
+        
+        // 如果新键没有数据，尝试从旧键迁移
+        if (raw === null || raw === undefined || raw === '{}') {
+            const oldRaw = GM_getValue(OLD_KEY_CHAT_TYPES, '{}');
+            if (oldRaw && oldRaw !== '{}' && oldRaw !== 'null' && oldRaw !== 'undefined') {
+                try {
+                    const oldData = typeof oldRaw === 'string' ? JSON.parse(oldRaw) : oldRaw;
+                    if (Object.keys(oldData).length > 0) {
+                        raw = oldRaw;
+                        // 将旧数据写入新键
+                        GM_setValue(KEY_CHAT_TYPES, raw);
+                        console.log('[DouYinSpark] 数据迁移成功：从 dy_fire_chat_types_v1 迁移到 douyin_spark_chat_types_v1');
+                    }
+                } catch (e) {
+                    console.error('[DouYinSpark] 数据迁移失败:', e);
+                    raw = '{}';
+                }
+            }
+        }
+        
+        if (raw === null || raw === undefined) {
+            raw = '{}';
+        }
+        
         try {
             const chatTypesObj = typeof raw === 'string' ? JSON.parse(raw) : raw;
             stagedWithTypes = new Map(Object.entries(chatTypesObj));
@@ -460,26 +569,258 @@
     // 用于跟踪是否已经执行过完整的多标签页抓取
     let hasDoneInitialMultiTabFetch = false;
 
+    // 从聊天列表容器中提取用户信息（名字和头像）
+    function extractChatUsersFromContainer() {
+        const users = [];
+        const container = document.querySelector(SELECTORS.chatListContainer);
+        
+        if (!container) {
+            // 如果找不到容器，则回退到原来的方式
+            const els = document.querySelectorAll(SELECTORS.userName);
+            els.forEach(el => {
+                const name = el.textContent && el.textContent.trim();
+                if (name) {
+                    users.push({ name: name, avatar: '' });
+                }
+            });
+            return users;
+        }
+        
+        // 直接遍历容器的子元素（每个子元素就是一个聊天项，包含头像和名字）
+        const chatItems = container.children;
+        for (let i = 0; i < chatItems.length; i++) {
+            const item = chatItems[i];
+            const imgEl = item.querySelector('img');
+            const nameEl = item.querySelector(SELECTORS.userName);
+            
+            const avatar = imgEl ? imgEl.src : '';
+            const name = nameEl ? nameEl.textContent.trim() : '';
+            
+            if (name) {
+                users.push({ name: name, avatar: avatar });
+            }
+        }
+        
+        return users;
+    }
+
+    // 从当前页面查找并更新聊天对象的名字（通过头像匹配）
+    // 弹出选择聊天对象的窗口进行名字更新
+    function showUpdateNamesDialog(targetOldName) {
+        const container = document.querySelector(SELECTORS.chatListContainer);
+        if (!container) {
+            alert('未找到聊天列表容器，请确保在聊天页面');
+            return;
+        }
+        
+        // 获取当前页面上的所有用户
+        const pageUsers = [];
+        const chatItems = container.children;
+        for (let i = 0; i < chatItems.length; i++) {
+            const item = chatItems[i];
+            const imgEl = item.querySelector('img');
+            const nameEl = item.querySelector(SELECTORS.userName);
+            
+            if (imgEl && nameEl) {
+                const avatar = imgEl.src;
+                const name = nameEl.textContent.trim();
+                if (avatar && name) {
+                    pageUsers.push({ name, avatar });
+                }
+            }
+        }
+        
+        if (pageUsers.length === 0) {
+            alert('当前页面没有聊天对象');
+            return;
+        }
+        
+        // 创建弹窗
+        const overlay = document.createElement('div');
+        overlay.className = 'dy-update-dialog-overlay';
+        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+        
+        const dialog = document.createElement('div');
+        dialog.style.cssText = 'background:#1c1c22;border-radius:12px;padding:24px;max-width:500px;box-shadow:0 8px 32px rgba(0,0,0,0.4);';
+        
+        dialog.innerHTML = `
+            <h3 style="color:#fff;margin:0 0 16px 0;font-size:18px;">更新 "${escapeHtml(targetOldName)}" 的名字</h3>
+            <p style="color:#aaa;font-size:13px;margin-bottom:16px;">从列表中选择一个新名字</p>
+            <div style="max-height:400px;overflow-y:auto;">
+                ${pageUsers.map(user => `
+                    <div class="dy-user-item" data-name="${escapeAttr(user.name)}" data-avatar="${escapeAttr(user.avatar)}" style="display:flex;align-items:center;padding:10px;margin:6px 0;background:rgba(255,255,255,0.05);border-radius:8px;cursor:pointer;transition:background 0.2s;">
+                        <img src="${escapeAttr(user.avatar)}" style="width:40px;height:40px;border-radius:50%;margin-right:12px;" />
+                        <span style="color:#fff;font-size:14px;">${escapeHtml(user.name)}</span>
+                    </div>
+                `).join('')}
+            </div>
+            <div style="margin-top:16px;text-align:right;">
+                <button class="dy-cancel-update-btn" style="padding:8px 20px;background:#6c757d;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:14px;">取消</button>
+            </div>
+        `;
+        
+        overlay.appendChild(dialog);
+        document.body.appendChild(overlay);
+        
+        // 绑定用户选项点击事件
+        dialog.querySelectorAll('.dy-user-item').forEach(item => {
+            item.addEventListener('click', () => {
+                const selectedName = item.dataset.name;
+                const selectedAvatar = item.dataset.avatar;
+                
+                if (selectedName === targetOldName) {
+                    alert('新名字与旧名字相同，无需更新');
+                    if (document.body.contains(overlay)) {
+                        document.body.removeChild(overlay);
+                    }
+                    return;
+                }
+                
+                // 将旧名字 targetOldName 替换为新名字 selectedName
+                const newStaged = [];
+                let updated = false;
+                
+                staged.forEach(oldName => {
+                    if (oldName === targetOldName) {
+                        if (!newStaged.includes(selectedName)) {
+                            newStaged.push(selectedName);
+                        }
+                        updated = true;
+                    } else {
+                        if (!newStaged.includes(oldName)) {
+                            newStaged.push(oldName);
+                        }
+                    }
+                });
+                
+                // 更新 persistent 中的键
+                if (persistent[targetOldName]) {
+                    persistent[selectedName] = {
+                        ...persistent[targetOldName],
+                        name: selectedName
+                    };
+                    delete persistent[targetOldName];
+                }
+                
+                // 更新 stagedWithTypes
+                const oldType = stagedWithTypes.get(targetOldName);
+                if (oldType) {
+                    stagedWithTypes.set(selectedName, oldType);
+                    stagedWithTypes.delete(targetOldName);
+                }
+                
+                // 保存更新
+                if (persistent[selectedName]) {
+                    staged = newStaged;
+                    savePersistent();
+                    saveChatTypes();
+                    alert(`已将 "${targetOldName}" 更新为 "${selectedName}"`);
+                } else if (updated) {
+                    staged = newStaged;
+                    savePersistent();
+                    saveChatTypes();
+                    alert(`已将 "${targetOldName}" 更新为 "${selectedName}"`);
+                } else {
+                    alert(`未找到 "${targetOldName}"`);
+                }
+                
+                if (document.body.contains(overlay)) {
+                    document.body.removeChild(overlay);
+                }
+                renderLists();
+            });
+        });
+        
+        // 绑定取消按钮事件
+        const cancelBtn = dialog.querySelector('.dy-cancel-update-btn');
+        if (cancelBtn) {
+            cancelBtn.addEventListener('click', () => {
+                if (document.body.contains(overlay)) {
+                    document.body.removeChild(overlay);
+                }
+            });
+        }
+    }
+
+    // 自动更新名字（不弹窗，直接通过头像匹配更新）
+    function updateNamesFromPage() {
+        const container = document.querySelector(SELECTORS.chatListContainer);
+        if (!container) return;
+        
+        // 获取当前页面上的所有用户（头像 -> 名字映射）
+        const avatarToNameMap = new Map();
+        const chatItems = container.children;
+        for (let i = 0; i < chatItems.length; i++) {
+            const item = chatItems[i];
+            const imgEl = item.querySelector('img');
+            const nameEl = item.querySelector(SELECTORS.userName);
+            
+            if (imgEl && nameEl) {
+                const avatar = imgEl.src;
+                const name = nameEl.textContent.trim();
+                if (avatar && name) {
+                    avatarToNameMap.set(avatar, name);
+                }
+            }
+        }
+        
+        // 更新 staged 中的名字
+        let updatedCount = 0;
+        const newStaged = [];
+        staged.forEach(oldName => {
+            // 尝试在持久化中查找对应的头像
+            const persistentData = persistent[oldName];
+            if (persistentData && persistentData.avatar) {
+                // 通过头像查找新名字
+                const newName = avatarToNameMap.get(persistentData.avatar);
+                if (newName && newName !== oldName) {
+                    console.log(`更新名字：${oldName} -> ${newName}`);
+                    newStaged.push(newName);
+                    updatedCount++;
+                    // 更新 stagedWithTypes
+                    const oldType = stagedWithTypes.get(oldName);
+                    if (oldType) {
+                        stagedWithTypes.set(newName, oldType);
+                        stagedWithTypes.delete(oldName);
+                    }
+                    // 更新 persistent 中的名字（保留头像）
+                    persistent[newName] = {
+                        ...persistent[oldName],
+                        name: newName
+                    };
+                    delete persistent[oldName];
+                } else {
+                    newStaged.push(oldName);
+                }
+            } else {
+                // 没有头像信息，保持原名
+                newStaged.push(oldName);
+            }
+        });
+        
+        if (updatedCount > 0) {
+            staged = newStaged;
+            savePersistent();
+            console.log(`更新了 ${updatedCount} 个聊天对象的名字`);
+        }
+    }
+
     // 自动抓取聊天列表到暂存（不加入已为续火花目标的对象）
     async function autoFetchChats(isPeriodic = false) {
+        // 在抓取前先更新名字
+        updateNamesFromPage();
+        
         // 如果是周期性调用且已经完成过初始多标签页抓取，则只在当前标签页查找
         if (isPeriodic && hasDoneInitialMultiTabFetch) {
             // 只在当前标签页查找用户
-            const els = document.querySelectorAll(SELECTORS.userName);
-            const names = [];
-            els.forEach(el => {
-                const name = el.textContent && el.textContent.trim();
-                if (name) names.push(name);
-            });
-
+            const users = extractChatUsersFromContainer();
+            
             let added = 0;
-            names.forEach(name => {
+            users.forEach(user => {
+                const name = user.name;
                 if (persistent[name]) return; // 已为续火花目标则忽略
                 if (!staged.includes(name)) {
                     staged.push(name);
-                    // Try to determine the current tab to set the correct type
-                    // For now, we'll default to friend, but in a real implementation
-                    // we would detect which tab is currently active
                     const currentTabType = determineCurrentTabType();
                     stagedWithTypes.set(name, currentTabType);
                     added++;
@@ -488,7 +829,7 @@
 
             if (added > 0) {
                 renderPanel();
-                saveChatTypes(); // Save chat types when new contacts are added
+                saveChatTypes();
             }
             return;
         }
@@ -505,52 +846,44 @@
                 friendTab.click();
                 await waitForPageLoadShort();
 
-                const els = document.querySelectorAll(SELECTORS.userName);
-                const names = [];
-                els.forEach(el => {
-                    const name = el.textContent && el.textContent.trim();
-                    if (name) names.push(name);
-                });
-
+                const users = extractChatUsersFromContainer();
+                
                 let added = 0;
-                names.forEach(name => {
-                    if (persistent[name]) return; // 已为续火花目标则忽略
+                users.forEach(user => {
+                    const name = user.name;
+                    if (persistent[name]) return;
                     if (!staged.includes(name)) {
                         staged.push(name);
-                        stagedWithTypes.set(name, 'friend'); // Friends tab
+                        stagedWithTypes.set(name, 'friend');
                         added++;
                     }
                 });
 
                 if (added > 0) {
                     renderPanel();
-                    saveChatTypes(); // Save chat types when new contacts are added
+                    saveChatTypes();
                 }
 
                 // 现在也获取陌生人和群聊的消息
                 await fetchOtherChatTypes();
             } else {
                 // 如果没有标签页，则按原来的方式处理
-                const els = document.querySelectorAll(SELECTORS.userName);
-                const names = [];
-                els.forEach(el => {
-                    const name = el.textContent && el.textContent.trim();
-                    if (name) names.push(name);
-                });
-
+                const users = extractChatUsersFromContainer();
+                
                 let added = 0;
-                names.forEach(name => {
-                    if (persistent[name]) return; // 已为续火花目标则忽略
+                users.forEach(user => {
+                    const name = user.name;
+                    if (persistent[name]) return;
                     if (!staged.includes(name)) {
                         staged.push(name);
-                        stagedWithTypes.set(name, 'friend'); // Friends tab
+                        stagedWithTypes.set(name, 'friend');
                         added++;
                     }
                 });
 
                 if (added > 0) {
                     renderPanel();
-                    saveChatTypes(); // Save chat types when new contacts are added
+                    saveChatTypes();
                 }
             }
         } catch (error) {
@@ -567,26 +900,22 @@
                 strangerTab.click();
                 await waitForPageLoadShort();
 
-                const strangerEls = document.querySelectorAll(SELECTORS.userName);
-                const strangerNames = [];
-                strangerEls.forEach(el => {
-                    const name = el.textContent && el.textContent.trim();
-                    if (name) strangerNames.push(name);
-                });
-
+                const users = extractChatUsersFromContainer();
+                
                 let added = 0;
-                strangerNames.forEach(name => {
-                    if (persistent[name]) return; // 已为续火花目标则忽略
+                users.forEach(user => {
+                    const name = user.name;
+                    if (persistent[name]) return;
                     if (!staged.includes(name)) {
                         staged.push(name);
-                        stagedWithTypes.set(name, 'stranger'); // Stranger tab
+                        stagedWithTypes.set(name, 'stranger');
                         added++;
                     }
                 });
 
                 if (added > 0) {
                     renderPanel();
-                    saveChatTypes(); // Save chat types when new contacts are added
+                    saveChatTypes();
                 }
             }
 
@@ -605,26 +934,22 @@
                 groupTab.click();
                 await waitForPageLoadShort();
 
-                const groupEls = document.querySelectorAll(SELECTORS.userName);
-                const groupNames = [];
-                groupEls.forEach(el => {
-                    const name = el.textContent && el.textContent.trim();
-                    if (name) groupNames.push(name);
-                });
-
+                const users = extractChatUsersFromContainer();
+                
                 let added = 0;
-                groupNames.forEach(name => {
-                    if (persistent[name]) return; // 已为续火花目标则忽略
+                users.forEach(user => {
+                    const name = user.name;
+                    if (persistent[name]) return;
                     if (!staged.includes(name)) {
                         staged.push(name);
-                        stagedWithTypes.set(name, 'group'); // Group tab
+                        stagedWithTypes.set(name, 'group');
                         added++;
                     }
                 });
 
                 if (added > 0) {
                     renderPanel();
-                    saveChatTypes(); // Save chat types when new contacts are added
+                    saveChatTypes();
                 }
             }
         } catch (error) {
@@ -1900,6 +2225,25 @@
         modal.style.display = 'none';
     }
 
+    // 从 DOM 获取用户头像
+    function getUserAvatarFromDOM(name) {
+        const container = document.querySelector(SELECTORS.chatListContainer);
+        if (!container) return '';
+        
+        const chatItems = container.children;
+        for (let i = 0; i < chatItems.length; i++) {
+            const item = chatItems[i];
+            const nameEl = item.querySelector(SELECTORS.userName);
+            const itemName = nameEl ? nameEl.textContent.trim() : '';
+            
+            if (itemName === name) {
+                const imgEl = item.querySelector('img');
+                return imgEl ? imgEl.src : '';
+            }
+        }
+        return '';
+    }
+
     function renderLists() {
         const stagedList = document.getElementById('dy-staged-list');
         const persistList = document.getElementById('dy-persist-list');
@@ -1911,21 +2255,33 @@
             const chatType = determineChatType(name);
             const typeLabel = getChatTypeLabel(chatType);
             const typeColor = getChatTypeColor(chatType);
+            // Get avatar from DOM
+            const avatar = getUserAvatarFromDOM(name);
 
             const li = document.createElement('li');
             li.className = 'dy-item';
-            // Check if this name is already in persistent storage (for consistency)
             const targetData = persistent[name];
-            const lastSendDate = targetData && targetData.lastSendDate ? `上次发送: ${targetData.lastSendDate}` : '未发送';
+            const lastSendDate = targetData && targetData.lastSendDate ? `上次发送：${targetData.lastSendDate}` : '未发送';
+            const isPersistent = !!persistent[name];
             li.innerHTML = `
-                <div class="dy-item-top">
-                    <label><input class="dy-select-checkbox" type="checkbox" data-name="${escapeAttr(name)}" ${selectedSet.has(name) ? 'checked' : ''} /> <span class="dy-item-name">${escapeHtml(name)}</span> <span class="chat-type-label" style="background:${typeColor};color:white;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:5px;">${typeLabel}</span></label>
-                    <div class="dy-item-date" style="font-size:11px; color:#aaa; margin-top:4px;">${escapeHtml(lastSendDate)}</div>
+                <div class="dy-item-top" style="display:flex;justify-content:space-between;align-items:flex-start;">
+                    <label style="flex:1;min-width:0;">
+                        <input class="dy-select-checkbox" type="checkbox" data-name="${escapeAttr(name)}" ${selectedSet.has(name) ? 'checked' : ''} />
+                        ${avatar ? `<img class="dy-item-avatar" src="${escapeAttr(avatar)}" style="width:24px;height:24px;border-radius:50%;vertical-align:middle;margin-right:6px;" />` : ''}
+                        <span class="dy-item-name">${escapeHtml(name)}</span>
+                        <span class="chat-type-label" style="background:${typeColor};color:white;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:5px;">${typeLabel}</span>
+                    </label>
+                    <button class="dy-btn dy-btn-send" data-name="${escapeAttr(name)}" style="padding:6px 14px;font-size:12px;background:#007bff;border:none;border-radius:6px;color:#fff;cursor:pointer;white-space:nowrap;">发送</button>
                 </div>
-                <div class="dy-item-actions">
-                    <button class="dy-btn dy-btn-add dy-btn-persist" data-name="${escapeAttr(name)}">添加目标</button>
-                    <button class="dy-btn dy-btn-edit" data-name="${escapeAttr(name)}">模板</button>
-                    <button class="dy-btn dy-btn-send" data-name="${escapeAttr(name)}">发送</button>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;">
+                    <div class="dy-item-date" style="font-size:11px; color:#aaa;">${escapeHtml(lastSendDate)}</div>
+                    <button class="dy-btn dy-btn-menu" data-name="${escapeAttr(name)}" data-action="menu" style="background:none;border:none;color:#aaa;cursor:pointer;font-size:16px;padding:2px 6px;">⋮</button>
+                </div>
+                <div class="dy-item-menu" id="menu-${escapeAttr(name)}" style="display:none;position:absolute;right:10px;top:50px;background:#1c1c22;border:1px solid rgba(255,255,255,0.1);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.3);z-index:1000;min-width:120px;">
+                    ${!isPersistent ? `<button class="dy-menu-item dy-btn-persist" data-name="${escapeAttr(name)}" style="width:100%;padding:8px 12px;background:none;border:none;color:#fff;cursor:pointer;text-align:left;">添加目标</button>` : ''}
+                    <button class="dy-menu-item dy-btn-edit" data-name="${escapeAttr(name)}" style="width:100%;padding:8px 12px;background:none;border:none;color:#fff;cursor:pointer;text-align:left;">模板</button>
+                    <button class="dy-menu-item dy-btn-update" data-name="${escapeAttr(name)}" style="width:100%;padding:8px 12px;background:none;border:none;color:#fff;cursor:pointer;text-align:left;">更新名字</button>
+                    ${isPersistent ? `<button class="dy-menu-item dy-btn-unpersist" data-name="${escapeAttr(name)}" style="width:100%;padding:8px 12px;background:none;border:none;color:#fff;cursor:pointer;text-align:left;">移除目标</button>` : ''}
                 </div>
             `;
             stagedList.appendChild(li);
@@ -1937,23 +2293,56 @@
             const chatType = determineChatType(name);
             const typeLabel = getChatTypeLabel(chatType);
             const typeColor = getChatTypeColor(chatType);
+            // Get avatar from DOM
+            const avatar = getUserAvatarFromDOM(name);
 
             const targetData = persistent[name];
-            const lastSendDate = targetData.lastSendDate ? `上次发送: ${targetData.lastSendDate}` : '未发送';
+            const lastSendDate = targetData.lastSendDate ? `上次发送：${targetData.lastSendDate}` : '未发送';
             const li = document.createElement('li');
             li.className = 'dy-item';
             li.innerHTML = `
-                <div class="dy-item-top">
-                    <label><input class="dy-select-checkbox" type="checkbox" data-name="${escapeAttr(name)}" ${selectedSet.has(name) ? 'checked' : ''} /> <span class="dy-item-name">${escapeHtml(name)}</span> <span class="chat-type-label" style="background:${typeColor};color:white;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:5px;">${typeLabel}</span></label>
-                    <div class="dy-item-date" style="font-size:11px; color:#aaa; margin-top:4px;">${escapeHtml(lastSendDate)}</div>
+                <div class="dy-item-top" style="display:flex;justify-content:space-between;align-items:flex-start;">
+                    <label style="flex:1;min-width:0;">
+                        <input class="dy-select-checkbox" type="checkbox" data-name="${escapeAttr(name)}" ${selectedSet.has(name) ? 'checked' : ''} />
+                        ${avatar ? `<img class="dy-item-avatar" src="${escapeAttr(avatar)}" style="width:24px;height:24px;border-radius:50%;vertical-align:middle;margin-right:6px;" />` : ''}
+                        <span class="dy-item-name">${escapeHtml(name)}</span>
+                        <span class="chat-type-label" style="background:${typeColor};color:white;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:5px;">${typeLabel}</span>
+                    </label>
+                    <button class="dy-btn dy-btn-send" data-name="${escapeAttr(name)}" style="padding:6px 14px;font-size:12px;background:#007bff;border:none;border-radius:6px;color:#fff;cursor:pointer;white-space:nowrap;">发送</button>
                 </div>
-                <div class="dy-item-actions">
-                    <button class="dy-btn dy-btn-remove dy-btn-unpersist" data-name="${escapeAttr(name)}">移除目标</button>
-                    <button class="dy-btn dy-btn-edit" data-name="${escapeAttr(name)}">模板</button>
-                    <button class="dy-btn dy-btn-send" data-name="${escapeAttr(name)}">发送</button>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;">
+                    <div class="dy-item-date" style="font-size:11px; color:#aaa;">${escapeHtml(lastSendDate)}</div>
+                    <button class="dy-btn dy-btn-menu" data-name="${escapeAttr(name)}" data-action="menu" style="background:none;border:none;color:#aaa;cursor:pointer;font-size:16px;padding:2px 6px;">⋮</button>
+                </div>
+                <div class="dy-item-menu" id="menu-${escapeAttr(name)}" style="display:none;position:absolute;right:10px;top:50px;background:#1c1c22;border:1px solid rgba(255,255,255,0.1);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.3);z-index:1000;min-width:120px;">
+                    <button class="dy-menu-item dy-btn-edit" data-name="${escapeAttr(name)}" style="width:100%;padding:8px 12px;background:none;border:none;color:#fff;cursor:pointer;text-align:left;">模板</button>
+                    <button class="dy-menu-item dy-btn-update" data-name="${escapeAttr(name)}" style="width:100%;padding:8px 12px;background:none;border:none;color:#fff;cursor:pointer;text-align:left;">更新名字</button>
+                    <button class="dy-menu-item dy-btn-unpersist" data-name="${escapeAttr(name)}" style="width:100%;padding:8px 12px;background:none;border:none;color:#fff;cursor:pointer;text-align:left;">移除目标</button>
                 </div>
             `;
             persistList.appendChild(li);
+        });
+
+        // 绑定菜单按钮事件
+        document.querySelectorAll('.dy-btn-menu').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const name = btn.dataset.name;
+                const menu = document.getElementById(`menu-${name}`);
+                if (menu) {
+                    // 关闭其他菜单
+                    document.querySelectorAll('.dy-item-menu').forEach(m => {
+                        if (m !== menu) m.style.display = 'none';
+                    });
+                    // 切换当前菜单
+                    menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
+                }
+            });
+        });
+
+        // 点击页面其他地方关闭所有菜单
+        document.addEventListener('click', () => {
+            document.querySelectorAll('.dy-item-menu').forEach(m => m.style.display = 'none');
         });
 
         // 绑定事件
@@ -1961,6 +2350,10 @@
         document.querySelectorAll('.dy-btn-unpersist').forEach(btn => btn.addEventListener('click', onUnpersist));
         document.querySelectorAll('.dy-btn-edit').forEach(btn => btn.addEventListener('click', onEditTemplate));
         document.querySelectorAll('.dy-btn-send').forEach(btn => btn.addEventListener('click', onSendNow));
+        document.querySelectorAll('.dy-btn-update').forEach(btn => btn.addEventListener('click', (e) => {
+            const name = e.currentTarget.dataset.name;
+            showUpdateNamesDialog(name);
+        }));
         // checkbox 事件
         document.querySelectorAll('.dy-select-checkbox').forEach(cb => cb.addEventListener('change', onSelectToggle));
         const selectAll = document.getElementById('dy-select-all');
@@ -2104,11 +2497,18 @@
         const name = e.currentTarget.dataset.name;
         if (!name) return;
         if (!persistent[name]) {
-            persistent[name] = { template: DEFAULT_TEMPLATE, macros: [], lastSendDate: '' };
+            // 获取头像并保存
+            const avatar = getUserAvatarFromDOM(name);
+            persistent[name] = { 
+                template: DEFAULT_TEMPLATE, 
+                macros: [], 
+                lastSendDate: '',
+                avatar: avatar  // 保存头像
+            };
         }
         // 从暂存移除
         staged = staged.filter(n => n !== name);
-        // 保留类型信息，即使在persistent列表中也需要显示类型
+        // 保留类型信息，即使在 persistent 列表中也需要显示类型
         savePersistent();
         saveChatTypes(); // Save the chat types
         renderLists();
@@ -2754,45 +3154,7 @@
         }
     }
 
-    // 测试宏系统
-    function testMacroSystem() {
-        // Test that macros are properly integrated
-        console.log('Testing macro system...');
-        console.log('Current macros:', macros);
-        console.log('Current persistent data:', persistent);
 
-        // Test template rendering with macros
-        const testTemplate = 'return "Hello " + targetName;';
-        const context = { targetName: 'TestUser' };
-        const result = renderTemplate(testTemplate, context, 'TestUser');
-        console.log('Template result:', result);
-
-    }
-
-    // 测试自动发送功能
-    function testAutoSendFeature() {
-        console.log('Testing auto send feature...');
-        console.log('Current settings:', settings);
-        console.log('Current persistent data structure:', persistent);
-
-        // Test that all persistent entries have lastSendDate
-        for (const [name, data] of Object.entries(persistent)) {
-            if (!data.hasOwnProperty('lastSendDate')) {
-                console.error(`Missing lastSendDate for ${name}`);
-            } else {
-                console.log(`${name} lastSendDate: ${data.lastSendDate}`);
-            }
-        }
-
-        // Test date comparison logic
-        const today = new Date().toDateString();
-        console.log('Today is:', today);
-
-        // Test scheduler tick logic
-        console.log('Testing scheduler tick with current settings...');
-        console.log('Send mode:', settings.sendMode);
-        console.log('Auto enabled:', settings.autoEnabled);
-    }
 
     // 启动：加载持久化并创建面板，然后开始定期抓取
     function start() {
@@ -2812,10 +3174,7 @@
         // 启动 scheduler（若启用）
         if (settings.autoEnabled) startScheduler();
 
-        // Test the macro system
-        testMacroSystem();
-        // Test the new auto send feature
-        testAutoSendFeature();
+
     }
 
     // 全局快捷键菜单
