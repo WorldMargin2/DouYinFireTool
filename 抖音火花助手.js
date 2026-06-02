@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         抖音火花助手
 // @namespace    http://tampermonkey.net/
-// @version      1.0.5
+// @version      1.0.7
 // @description  自动抓取聊天列表到暂存，支持将对象添加为续火花目标、每对象模板、$date/$targetName/$sinceDate()、简单条件语句。参考 fire.js 的选择器与发送逻辑。
 // @author       WorldMargin
 // @match        https://creator.douyin.com/creator-micro/data/following/chat
@@ -23,20 +23,71 @@
 
     // 创建命名空间
     window.DouYinSpark = window.DouYinSpark || {};
+    
+    // 系统预设变量（不可删除，但可查看）
+    const SYSTEM_VARS = {
+        'date': {
+            type: 'variable',
+            value: 'new Date().toLocaleDateString()',
+            description: '当前日期',
+            isSystem: true
+        },
+        'targetName': {
+            type: 'variable',
+            value: 'targetName',
+            description: '目标名称',
+            isSystem: true
+        },
+        'sinceDate': {
+            type: 'function',
+            value: 'function(dateStr) { try { const d = new Date(dateStr); if (isNaN(d)) return 0; const now = new Date(); const diff = now - d; return Math.floor(diff / (1000 * 60 * 60 * 24)); } catch (e) { return 0; } }',
+            description: '相识天数（需要参数：日期字符串）',
+            isSystem: true
+        }
+    };
+    
     // 预处理变量函数，用于替换编辑器中的变量
     function preprocessVariables(code, targetName) {
         let processedCode = code;
         
-        // 替换$targetName为实际目标名称
-        processedCode = processedCode.replace(/\$targetName/g, `${targetName}`);
+        // 合并系统变量和自定义变量
+        const allVars = { ...SYSTEM_VARS, ...customVars };
         
-        // 替换$date为当前日期
-        processedCode = processedCode.replace(/\$date/g, `${new Date().toLocaleDateString()}`);
-        
-        // 处理$sinceDate函数，将其转换为实际的天数
-        processedCode = processedCode.replace(/\$sinceDate\(\s*["\']([^"\']+)["\']\s*\)/g, (_, dateStr) => {
-            const days = daysSince(dateStr);
-            return days;
+        // 处理所有变量（包括系统变量和自定义变量）
+        Object.entries(allVars).forEach(([varName, varData]) => {
+            if (varData.type === 'function') {
+                // 函数类型：查找 $varName(...) 并执行函数，直接替换为返回值
+                const funcRegex = new RegExp(`\\$${varName}\\(([^)]*)\\)`, 'g');
+                processedCode = processedCode.replace(funcRegex, (_, args) => {
+                    try {
+                        // 构建函数调用并执行：将函数定义包裹在括号中，然后调用
+                        // 例如：(function(dateStr) {...})("2019-9-1")
+                        const funcCode = `(${varData.value})(${args})`;
+                        const result = eval(funcCode);
+                        return result;
+                    } catch (e) {
+                        console.error(`[DouYinSpark] 执行函数 $${varName} 失败:`, e);
+                        return '';
+                    }
+                });
+            } else if (varData.type === 'variable') {
+                // 变量类型：直接计算值并替换
+                // 对于 $date 和 $targetName 等特殊变量，也直接计算值
+                if (varName === 'date') {
+                    const value = new Date().toLocaleDateString();
+                    processedCode = processedCode.replace(new RegExp(`\\$${varName}\\b`, 'g'), value);
+                } else if (varName === 'targetName') {
+                    processedCode = processedCode.replace(new RegExp(`\\$${varName}\\b`, 'g'), targetName);
+                } else {
+                    // 自定义变量：计算表达式值
+                    try {
+                        const value = eval(varData.value);
+                        processedCode = processedCode.replace(new RegExp(`\\$${varName}\\b`, 'g'), value);
+                    } catch (e) {
+                        console.error(`[DouYinSpark] 计算变量 $${varName} 失败:`, e);
+                    }
+                }
+            }
         });
         
         return processedCode;
@@ -89,6 +140,7 @@
 
     const KEY_SETTINGS = 'douyin_spark_settings_v1';
     const KEY_CHAT_TYPES = 'douyin_spark_chat_types_v1';
+    const KEY_CUSTOM_VARS = 'douyin_spark_custom_vars_v1';
 
     // 旧设置键 - 用于数据迁移
     const OLD_KEY_SETTINGS = 'dy_fire_settings_v1';
@@ -101,6 +153,9 @@
         sendMode: 'scheduled', // 'scheduled' or 'automatic'
         theme: 'dark'
     };
+
+    // 自定义变量：{ varName: { type: 'function' | 'variable', value: string } }
+    let customVars = {};
     let schedulerTimer = null;
     let lastScheduledRun = '';
 
@@ -149,104 +204,375 @@
         }
     }
 
+    function loadCustomVars() {
+        try {
+            const raw = GM_getValue(KEY_CUSTOM_VARS, '{}');
+            customVars = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        } catch (e) {
+            customVars = {};
+        }
+    }
+
+    function saveCustomVars() {
+        try {
+            GM_setValue(KEY_CUSTOM_VARS, JSON.stringify(customVars));
+        } catch (e) {
+            console.error('[DouYinSpark] 保存自定义变量失败:', e);
+        }
+    }
 
 
     // 注入样式表（一次）
     function injectStyles() {
         if (document.getElementById('dy-fire-styles')) return;
         let css = `
-            .dy-panel { position: fixed; z-index: 9999; font-family: Microsoft YaHei; }
-            .dy-panel .dy-root { width: 540px; background: linear-gradient(180deg,#1c1c22, #141418); color: #fff; border-radius:12px; padding:14px; box-shadow: 0 20px 50px rgba(0,0,0,0.6); position:relative }
-            .dy-panel.dy-theme-light .dy-root { background: linear-gradient(180deg,#ffffff,#f3f4f6); color:#111 }
-            .dy-panel .dy-header{ display:flex; justify-content:space-between; align-items:center; margin-bottom:8px }
-            .dy-panel .dy-header strong{ font-size:16px }
-            .dy-panel .dy-controls{ display:flex; gap:8px; align-items:center }
-            .dy-panel .dy-body{ display:flex; gap:10px; flex-wrap:wrap }
-            .dy-panel .dy-column{ flex:1; background:rgba(255,255,255,0.03); padding:8px; border-radius:6px; max-height:300px; overflow:visible; min-width:220px; max-width:calc(50% - 10px) }
-            /* 面板自适应窗口，防止整体溢出 */
-            .dy-panel .dy-root{ max-width: calc(100vw - 40px); max-height: calc(100vh - 40px); box-sizing: border-box; overflow:auto }
-            @media (max-width: 640px) {
-                .dy-panel .dy-body{ flex-direction:column }
-                .dy-panel .dy-column{ max-width:100% }
-                .dy-panel .dy-controls{ flex-wrap:wrap }
+            /* 统一主题变量，便于全局风格调整 */
+            :root {
+                --dy-bg1: #1c1c22;
+                --dy-bg2: #141418;
+                --dy-text: #e6eef8;
+                --dy-accent1: #ff6b8b;
+                --dy-accent2: #ff2c54;
+                --dy-accent-alt1: #4b5563;
+                --dy-accent-alt2: #374151;
+                --dy-success1: #10b981;
+                --dy-success2: #059669;
+                --dy-macro1: #8b5cf6;
+                --dy-macro2: #7c3aed;
+                --dy-muted: #bbb;
+                --dy-radius: 12px;
+                --dy-font: "Microsoft YaHei", Arial, sans-serif;
             }
-            .dy-panel .dy-title{ font-size:12px; color:#bbb; margin-bottom:6px }
-            .dy-panel .dy-select-all{ margin-bottom:6px }
-            .dy-panel .dy-btn{ background: linear-gradient(90deg,#ff6b8b,#ff2c54); border:none; color:#fff; padding:6px 8px; height:30px; line-height:18px; border-radius:8px; cursor:pointer; font-size:13px; box-shadow:0 6px 18px rgba(255,44,84,0.12); }
-            .dy-panel .dy-btn-light{ background: linear-gradient(90deg,#4b5563,#374151);
-                color:#fff }
-            .dy-panel .dy-btn-add{ background: linear-gradient(90deg,#2dd4bf,#06b6d4); }
-            .dy-panel .dy-btn-send{ background: linear-gradient(90deg,#10b981,#059669); }
-            .dy-panel .dy-btn-remove{ background: linear-gradient(90deg,#f97316,#ef4444); }
-            .dy-panel .dy-btn-macro{ background: linear-gradient(90deg,#8b5cf6,#7c3aed); }
-            .dy-panel input, .dy-panel textarea{ background:#0f1114; border:1px solid rgba(255,255,255,0.06); color:#e6eef8; padding:6px 8px; border-radius:6px; font-size:13px }
-            .dy-panel .dy-list{ padding:6px; margin:0; list-style:none; max-height:40vh; overflow:auto; border-top:1px solid rgba(255,255,255,0.04); }
-            /* 底部设置横向占满（避免全局竖向滚动） */
-            .dy-panel .dy-settings-bottom{ width:100%; display:flex; gap:10px; flex-wrap:wrap; align-items:flex-start; justify-content:flex-start; padding:6px 6px; border-top:1px solid rgba(255,255,255,0.03); box-sizing:border-box }
-            .dy-panel .dy-settings-bottom .dy-settings-row{ display:flex; gap:8px; align-items:center; flex:0 0 auto; height:30px }
-            .dy-panel .dy-settings-bottom label{ font-size:12px; min-width:80px }
-            .dy-panel .dy-settings-bottom input[type=time], .dy-panel .dy-settings-bottom input[type=number]{ height:26px; padding:2px 6px; font-size:13px }
-            .dy-panel .dy-settings-bottom .dy-btn{ padding:4px 8px; height:28px; font-size:13px }
-            .dy-panel .dy-settings-bottom .dy-status{ font-size:12px; color:inherit }
-            @media (max-width:640px){ .dy-panel .dy-settings-bottom{ flex-direction:column; align-items:stretch } .dy-panel .dy-settings-bottom .dy-settings-row{ width:100%; justify-content:space-between } }
-            .dy-panel .dy-item{ display:block; padding:8px 6px; border-radius:6px; margin-bottom:8px; background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.02)); border:1px solid rgba(255,255,255,0.03); }
+            .dy-panel.dy-theme-light {
+                --dy-bg1: #ffffff;
+                --dy-bg2: #f8fafc;
+                --dy-text: #0f1724;
+                --dy-accent1: #2563eb; /* blue */
+                --dy-accent2: #06b6d4; /* teal */
+                --dy-accent-alt1: #6b7280; /* gray */
+                --dy-accent-alt2: #374151; /* dark gray */
+                --dy-muted: #6b7280;
+                --dy-macro1: #10b981; /* green */
+                --dy-macro2: #06b6d4; /* teal */
+            }
+
+            /* 全局按钮/面板基础覆盖，优先使用变量以便后续统一 */
+            .dy-panel .dy-root { background: linear-gradient(180deg,var(--dy-bg1), var(--dy-bg2)); color: var(--dy-text); font-family: var(--dy-font); border-radius: var(--dy-radius); }
+            .dy-panel .dy-btn { background: var(--dy-accent1); border:none; color:#fff; padding:6px 10px; height:32px; line-height:20px; border-radius:8px; cursor:pointer; font-size:13px; box-shadow:0 6px 18px rgba(255,44,84,0.12); transition: all 0.2s; }
+            .dy-panel .dy-btn:hover { transform: translateY(-1px); box-shadow:0 8px 22px rgba(255,44,84,0.18); }
+            .dy-panel .dy-btn:active { transform: translateY(0); }
+            .dy-panel .dy-btn-send { background: var(--dy-success1); }
+            .dy-panel .dy-btn-macro { background: var(--dy-macro1); }
+
+            /* Legacy inline forms removed in favor of popup editors */
+
+            /* update names dialog */
+            .dy-update-dialog-overlay { position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px; }
+            .dy-update-dialog { background:linear-gradient(180deg,var(--dy-bg1), var(--dy-bg2)); border-radius:12px;padding:20px;max-width:520px;box-shadow:0 8px 32px rgba(0,0,0,0.4); color:var(--dy-text); }
+            .dy-update-dialog .dy-user-item { display:flex;align-items:center;padding:10px;margin:6px 0;background:rgba(255,255,255,0.03);border-radius:8px;cursor:pointer;transition:background 0.15s; }
+            .dy-update-dialog .dy-user-item:hover { background:rgba(255,255,255,0.06); }
+            .dy-update-dialog .dy-user-item img { width:40px;height:40px;border-radius:50%;margin-right:12px;object-fit:cover; }
+            .dy-update-dialog .dy-user-item span { font-size:14px;color:var(--dy-text); }
+            .dy-update-dialog .dy-update-title { color: var(--dy-text); margin: 0 0 12px 0; font-size:18px; }
+            .dy-update-dialog .dy-update-desc { color: rgba(255,255,255,0.7); margin: 0 0 12px 0; font-size:13px; }
+            .dy-update-list { max-height: 400px; overflow-y: auto; }
+            .dy-update-footer { margin-top:16px; text-align:right; }
+
+            /* small button variants and controls sizing */
+            #dy-select-added-targets { margin-left: 10px; padding: 4px 8px; font-size: 11px; }
+            #dy-send-mode { width: 120px; }
+            #dy-interval-sec { width: 60px; }
+            .dy-hidden { display: none; }
+            .dy-text-right { text-align: right; margin-top: 6px; }
+
+            /* Monaco container size helpers */
+            .monaco-container { width: 100%; min-height: 120px; }
+            .monaco-container.h300 { height: 300px; }
+            .monaco-container.h200 { height: 200px; margin-top: 8px; }
+            .monaco-container.h150 { min-height: 150px; height: 200px; border-radius: 8px; overflow: hidden; }
+
+            /* 全局复用表单控件样式 */
+            .dy-input, .dy-select { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.06); background: linear-gradient(180deg, transparent, rgba(255,255,255,0.02)); color: var(--dy-text); box-sizing: border-box; transition: box-shadow 120ms, border-color 120ms, transform 60ms; }
+            .dy-input:focus, .dy-select:focus { outline: none; border-color: rgba(0,0,0,0.12); box-shadow: 0 6px 18px rgba(0,0,0,0.16); transform: translateY(-1px); }
+            .dy-btn { padding: 8px 12px; border-radius: 8px; cursor: pointer; border: none; font-weight: 600; }
+            .dy-btn:hover { transform: translateY(-1px); }
+            .dy-btn-primary { background: linear-gradient(90deg,var(--dy-accent1),var(--dy-accent2)); color: #fff; }
+            .dy-btn-light { background: transparent; border: 1px solid rgba(255,255,255,0.06); color: var(--dy-text); }
+            /* Light theme overrides for inputs/buttons */
+            .dy-panel.dy-theme-light .dy-input, .dy-panel.dy-theme-light .dy-select { border-color: rgba(0,0,0,0.08); background: linear-gradient(180deg, transparent, rgba(0,0,0,0.02)); color: var(--dy-text); }
+            .dy-panel.dy-theme-light .dy-btn-primary { background: linear-gradient(90deg,var(--dy-accent1),var(--dy-accent2)); color:#fff; }
+
+            /* Reusable scroll list class for vertical scroll and hidden horizontal overflow */
+            .dy-scroll-list { max-height: 520px; overflow-y: auto; overflow-x: hidden; box-sizing: border-box; }
+
+            /* Inline macro form buttons removed */
+            .dy-var-desc.custom { margin-top:10px; font-size:11px; color:#888; }
+            #dy-var-editor-monaco { border-radius:8px; overflow:hidden; }
+            textarea.dy-monospace { font-family: monospace; }
+            .textarea-full { width:100%; min-height:120px; margin-top:8px; }
+
+            .dy-empty { padding:20px; text-align:center; color:#888; }
+            .dy-var-system-label { color:#888; font-size:11px; margin-right:6px; }
+
+            .dy-item-top.flex-between { display:flex; justify-content:space-between; align-items:center; gap: 8px; }
+            .dy-item-label { flex:1; min-width:0; display: flex; align-items: center; gap: 6px; }
+            .dy-item-avatar { width:24px; height:24px; border-radius:50%; vertical-align:middle; margin-right:6px; object-fit:cover; flex-shrink: 0; }
+            .chat-type-label { background: var(--chat-type-bg, rgba(107,114,128,0.8)); color: white; padding:2px 6px; border-radius:4px; font-size:10px; margin-left:5px; display:inline-block; flex-shrink: 0; }
+            .dy-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            .dy-item-row { display:flex; justify-content:space-between; align-items:center; margin-top:6px; }
+            .dy-item-date { font-size:11px; color:#aaa; }
+            .dy-btn-menu { background:none; border:none; color:#aaa; cursor:pointer; font-size:16px; padding:2px 6px; }
+            .dy-item-menu { display:none; position:absolute; right:0; top:100%; background:var(--dy-bg1); border:1px solid rgba(255,255,255,0.1); border-radius:6px; box-shadow:0 4px 12px rgba(0,0,0,0.3); z-index:1000; min-width:120px; margin-top:4px; }
+            .dy-menu-item { width:100%; padding:8px 12px; background:none; border:none; color:var(--dy-text); cursor:pointer; text-align:left; }
+            .dy-menu-item:hover { background: rgba(255,255,255,0.03); }
+            .dy-var-uneditable { color:#888; font-size:10px; }
+            .dy-macro-item-templates { font-size:11px; color:#aaa; margin-top:4px; }
+            .dy-macro-assign { margin-top:8px; }
+            .dy-cancel-update-btn { padding:8px 20px;background:linear-gradient(90deg,var(--dy-accent-alt1),var(--dy-accent-alt2));border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:14px; }
+
+            .dy-panel { position: fixed; z-index: 9999; font-family: Microsoft YaHei; }
+            .dy-panel .dy-root { 
+                width: 100%;
+                height: 100%;
+                min-width: 400px;
+                min-height: 300px;
+                background: linear-gradient(180deg,#1c1c22, #141418); 
+                color: #fff; 
+                border-radius:12px; 
+                padding:14px; 
+                box-shadow: 0 20px 50px rgba(0,0,0,0.6); 
+                position:relative;
+                display: flex;
+                flex-direction: column;
+                box-sizing: border-box;
+                overflow: hidden;
+            }
+            .dy-panel.dy-theme-light .dy-root { background: linear-gradient(180deg,#ffffff,#f3f4f6); color:#111 }
+            .dy-panel .dy-header{ display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-shrink: 0; }
+            .dy-panel .dy-header strong{ font-size:16px }
+            .dy-panel .dy-controls{ display:flex; gap:8px; align-items:center; flex-wrap: wrap; }
+            .dy-panel .dy-body{ 
+                display:flex; 
+                gap:12px; 
+                flex:1; 
+                min-height: 0;
+                overflow: hidden;
+                margin-bottom: 10px;
+            }
+            .dy-panel .dy-column{ 
+                flex:1; 
+                background:rgba(255,255,255,0.03); 
+                padding:10px; 
+                border-radius:8px; 
+                min-width: 180px;
+                display: flex;
+                flex-direction: column;
+                overflow: visible;
+            }
+            .dy-panel .dy-column .dy-list-container {
+                flex: 1;
+                overflow-y: auto;
+                overflow-x: hidden;
+                min-height: 0;
+                margin: 0 -10px;
+                padding: 0 10px;
+            }
+            .dy-panel .dy-title{ font-size:12px; color:#bbb; margin-bottom:8px; flex-shrink: 0; }
+            .dy-panel .dy-select-all{ margin-bottom:8px; flex-shrink: 0; }
+            .dy-panel .dy-btn-light{ background: #4b5563; color:#fff }
+            .dy-panel .dy-btn-add{ background: #2dd4bf; }
+            .dy-panel .dy-btn-remove{ background: #f97316; }
+            /* 亮色主题下菜单栏按钮统一使用灰色渐变 */
+            .dy-panel.dy-theme-light .dy-btn {
+                background: linear-gradient(90deg, rgb(55, 65, 81), rgb(75, 85, 99));
+            }
+            .dy-panel.dy-theme-light .dy-btn-light {
+                background: linear-gradient(90deg, rgb(55, 65, 81), rgb(75, 85, 99));
+            }
+            .dy-panel input, .dy-panel textarea{ background:#0f1114; border:1px solid rgba(255,255,255,0.06); color:#e6eef8; padding:6px 10px; border-radius:6px; font-size:13px; transition: border-color 0.2s; }
+            .dy-panel input:focus, .dy-panel textarea:focus { border-color: rgba(255,107,139,0.5); outline: none; }
+            .dy-panel .dy-list{ padding:4px; margin:0; list-style:none; min-height: 0; overflow-y: visible; }
+            .dy-panel .dy-item{ 
+                display:block; 
+                padding:10px 8px; 
+                border-radius:8px; 
+                margin-bottom:6px; 
+                background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.02)); 
+                border:1px solid rgba(255,255,255,0.03); 
+                transition: all 0.2s;
+                position: relative;
+            }
+            .dy-panel .dy-item:hover { background: rgba(255,255,255,0.05); border-color: rgba(255,107,139,0.3); }
+            .dy-panel.dy-theme-light .dy-item:hover { background: rgba(0,0,0,0.08); border-color: rgba(0,0,0,0.2); }
             .dy-panel .dy-item + .dy-item{ margin-top:6px }
-            .dy-panel .dy-item .dy-item-top{ display:block; font-size:13px; color:#e6eef8; white-space:normal; overflow:hidden; text-overflow:ellipsis; max-height:3.2em }
+            .dy-panel .dy-item .dy-item-top{ display:flex; font-size:13px; color:#e6eef8; align-items: center; gap: 8px; }
             .dy-panel.dy-theme-light .dy-item .dy-item-top{ color:#111 }
-            .dy-panel .dy-item-name{ color:inherit }
+            .dy-panel .dy-item-name{ 
+                color:inherit; 
+                font-weight: 500;
+                display: block;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                flex: 1;
+                min-width: 0;
+            }
+            .dy-panel .chat-type-label {
+                white-space: nowrap;
+            }
             .dy-panel.dy-theme-light .dy-item-name{ color:#111 }
-            .dy-panel .dy-item .dy-item-actions{ display:flex; gap:6px; margin-top:8px; justify-content:flex-end }
-            .dy-panel .dy-item label{ display:inline-flex; align-items:center; gap:8px }
-            .dy-panel .dy-resizer{ width:14px;height:14px; position:absolute; right:6px; bottom:6px; cursor:se-resize; border-radius:3px; background:linear-gradient(135deg, rgba(255,255,255,0.06), rgba(0,0,0,0.06)); }
-            .dy-panel .dy-template-editor{ margin-top:8px; background:rgba(0,0,0,0.15); padding:8px; border-radius:6px }
-            .dy-panel .dy-tpl-desc{ font-size:12px; color:#ddd; margin-bottom:6px }
+            .dy-panel .dy-item .dy-item-actions{ display:flex; gap:6px; margin-top:8px; justify-content:flex-end; flex-wrap: wrap; }
+            .dy-panel .dy-item label{ display:inline-flex; align-items:center; gap:8px; cursor: pointer; }
+            .dy-panel .dy-resizer{ width:16px;height:16px; position:absolute; right:8px; bottom:8px; cursor:se-resize; border-radius:4px; background:linear-gradient(135deg, rgba(255,255,255,0.08), rgba(0,0,0,0.08)); transition: all 0.2s; }
+            .dy-panel .dy-resizer:hover { background:linear-gradient(135deg, rgba(255,107,139,0.3), rgba(255,44,84,0.3)); }
+            .dy-panel .dy-template-editor{ margin-top:10px; background:rgba(0,0,0,0.15); padding:10px; border-radius:8px; flex-shrink: 0; }
+            .dy-panel .dy-tpl-desc{ font-size:12px; color:#ddd; margin-bottom:8px }
+            .dy-panel .dy-settings-bottom{ 
+                padding:10px; 
+                border-top:1px solid rgba(255,255,255,0.03); 
+                flex-shrink: 0;
+                gap: 12px;
+            }
+            .dy-panel .dy-settings-bottom .dy-settings-row{ 
+                display:flex; 
+                gap:10px; 
+                align-items:center; 
+                flex-wrap: wrap;
+            }
+            .dy-panel .dy-settings-bottom label{ font-size:12px; min-width:100px; white-space: nowrap; }
+            .dy-panel .dy-settings-bottom input[type=time], .dy-panel .dy-settings-bottom input[type=number]{ height:28px; padding:4px 8px; font-size:13px; }
+            .dy-panel .dy-settings-bottom .dy-btn{ padding:6px 10px; height:30px; font-size:13px; }
+            .dy-panel .dy-settings-bottom .dy-status{ font-size:12px; color:inherit; white-space: nowrap; }
+            .dy-panel .dy-item-checkbox { margin-right: 8px; }
+            /* 响应式布局 */
+            @media (max-width: 768px) {
+                .dy-panel .dy-root { width: calc(100vw - 20px) !important; height: auto !important; min-height: 400px; }
+                .dy-panel .dy-body { flex-direction: column; }
+                .dy-panel .dy-column { min-height: 200px; }
+                .dy-panel .dy-header { flex-direction: column; gap: 8px; align-items: flex-start; }
+                .dy-panel .dy-controls { width: 100%; justify-content: flex-start; }
+                .dy-panel .dy-settings-bottom .dy-settings-row { flex-direction: column; align-items: flex-start; gap: 6px; }
+                .dy-panel .dy-settings-bottom label { min-width: auto; }
+            }
+            @media (max-width: 480px) {
+                .dy-panel .dy-btn { padding: 4px 8px; font-size: 12px; height: 28px; }
+                .dy-panel .dy-controls { gap: 4px; }
+            }
             /* 宏管理面板样式 */
             .dy-panel .dy-macro-panel { display: none; }
             .dy-panel .dy-macro-panel.active { display: block; }
-            .dy-panel .dy-macro-body { display: flex; gap: 10px; }
-            .dy-panel .dy-macro-column { flex: 1; background: rgba(255,255,255,0.03); padding: 8px; border-radius: 6px; max-height: 400px; overflow: auto; min-width: 250px; }
+            .dy-panel .dy-macro-body { 
+                display: flex; 
+                gap: 12px;
+                flex: 1;
+                min-height: 0;
+                overflow: hidden;
+            }
+            .dy-panel .dy-macro-column { 
+                flex: 1; 
+                background: rgba(255,255,255,0.03); 
+                padding: 10px; 
+                border-radius: 8px; 
+                min-width: 200px;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+            }
+            .dy-panel .dy-macro-column .macro-list-container {
+                flex: 1;
+                overflow-y: auto;
+                overflow-x: hidden;
+                min-height: 0;
+            }
             .dy-panel .dy-macro-column.manage-macros { border-right: 2px solid rgba(255,255,255,0.1); }
             .dy-panel .dy-macro-column.apply-macros { border-left: 2px solid rgba(255,255,255,0.1); }
-            .dy-panel .dy-macro-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-            .dy-panel .dy-macro-title { font-size: 14px; font-weight: bold; color: #e6eef8; }
-            .dy-panel .dy-macro-item { padding: 8px; margin-bottom: 6px; background: rgba(0,0,0,0.2); border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); }
+            .dy-panel .dy-macro-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-shrink: 0; }
+            .dy-panel .dy-macro-title { font-size: 14px; font-weight: bold; color: gray; }
+            .dy-panel .dy-macro-item { padding: 10px; margin-bottom: 8px; background: rgba(0,0,0,0.2); border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); transition: all 0.2s; }
+            .dy-panel .dy-macro-item:hover { background: rgba(0,0,0,0.25); }
             .dy-panel .dy-macro-item.enabled { border-left: 3px solid #10b981; }
             .dy-panel .dy-macro-item.disabled { border-left: 3px solid #ef4444; opacity: 0.7; }
-            .dy-panel .dy-macro-item-name { font-weight: bold; margin-bottom: 4px; }
-            .dy-panel .dy-macro-item-desc { font-size: 12px; color: #aaa; margin-bottom: 6px; }
-            .dy-panel .dy-macro-item-code { font-family: monospace; font-size: 11px; background: rgba(0,0,0,0.3); padding: 4px; border-radius: 3px; overflow: auto; max-height: 60px; }
-            .dy-panel .dy-macro-actions { display: flex; gap: 4px; margin-top: 6px; }
-            .dy-panel .dy-macro-toggle { padding: 4px 6px; font-size: 11px; }
-            .dy-panel .dy-macro-edit { padding: 4px 6px; font-size: 11px; }
-            .dy-panel .dy-macro-delete { padding: 4px 6px; font-size: 11px; }
-            .dy-panel .dy-macro-form { margin-top: 10px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 6px; }
-            .dy-panel .dy-macro-form input, .dy-panel .dy-macro-form textarea { width: 100%; box-sizing: border-box; margin-bottom: 6px; }
-            .dy-panel .dy-macro-form textarea { min-height: 80px; }
-            .dy-panel .dy-macro-form-buttons { text-align: right; }
+            .dy-panel .dy-macro-item-name { font-weight: bold; margin-bottom: 6px; }
+            .dy-panel .dy-macro-item-desc { font-size: 12px; color: #aaa; margin-bottom: 8px; }
+            .dy-panel .dy-macro-item-code { font-family: monospace; font-size: 11px; background: rgba(0,0,0,0.3); padding: 6px; border-radius: 4px; overflow: auto; max-height: 80px; }
+            .dy-panel .dy-macro-actions { display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; }
+            .dy-panel .dy-macro-toggle { padding: 4px 8px; font-size: 11px; }
+            .dy-panel .dy-macro-edit { padding: 4px 8px; font-size: 11px; }
+            .dy-panel .dy-macro-delete { padding: 4px 8px; font-size: 11px; }
+            /* Inline macro form styles removed */
             .dy-panel .dy-macro-select { width: 100%; padding: 6px; border-radius: 6px; background: #0f1114; border: 1px solid rgba(255,255,255,0.06); color: #e6eef8; }
-            .dy-panel .dy-macro-assign-btn { background: linear-gradient(90deg,#8b5cf6,#7c3aed); width: 100%; margin-top: 4px; }
-            .dy-panel .dy-macro-clear-btn { background: linear-gradient(90deg,#f97316,#ef4444); width: 100%; margin-top: 4px; }
+            /* 变量管理面板样式 */
+            .dy-panel .dy-var-panel { display: none; }
+            .dy-panel .dy-var-panel.active { display: block; }
+            .dy-panel .dy-var-body { 
+                display: flex; 
+                gap: 12px;
+                flex: 1;
+                min-height: 0;
+                overflow: hidden;
+            }
+            .dy-panel .dy-var-column { 
+                flex: 1; 
+                background: rgba(255,255,255,0.03); 
+                padding: 10px; 
+                border-radius: 8px; 
+                min-width: 200px;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+            }
+            .dy-panel .dy-var-column .var-list-container {
+                flex: 1;
+                overflow-y: auto;
+                overflow-x: hidden;
+                min-height: 0;
+            }
+            .dy-panel .dy-var-column.manage-vars { border-right: 2px solid rgba(255,255,255,0.1); }
+            .dy-panel .dy-var-column.var-info { border-left: 2px solid rgba(255,255,255,0.1); }
+            .dy-panel .dy-var-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-shrink: 0; }
+            .dy-panel .dy-var-title { font-size: 14px; font-weight: bold; color: #e6eef8; }
+            .dy-panel .dy-var-item { padding: 10px; margin-bottom: 8px; background: rgba(0,0,0,0.2); border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); transition: all 0.2s; }
+            .dy-panel .dy-var-item:hover { background: rgba(0,0,0,0.25); }
+            .dy-panel .dy-var-item-name { font-weight: bold; margin-bottom: 6px; color: var(--dy-accent1); }
+            .dy-panel .dy-var-item-type { font-size: 11px; color: #aaa; background: rgba(139,92,246,0.2); padding: 2px 6px; border-radius: 4px; display: inline-block; margin-bottom: 6px; }
+            .dy-panel .dy-var-item-value { font-size: 11px; color: #e6eef8; background: rgba(0,0,0,0.3); padding: 6px; border-radius: 4px; overflow: auto; max-height: 60px; font-family: monospace; }
+            .dy-panel .dy-var-actions { display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; }
+            .dy-panel .dy-var-edit { padding: 4px 8px; font-size: 11px; background: linear-gradient(90deg,var(--dy-accent2),var(--dy-accent1)); }
+            .dy-panel .dy-var-delete { padding: 4px 8px; font-size: 11px; background: linear-gradient(90deg,#f97316,#ef4444); }
+            /* Inline var form styles removed */
+            .dy-panel .dy-var-desc { font-size: 12px; color: #aaa; margin-bottom: 10px; }
             /* 模态模板编辑器 */
             #dy-template-modal { position: fixed; left: 0; top: 0; right: 0; bottom: 0; display: none; z-index: 10000; }
             #dy-template-modal .dy-tpl-overlay { position: absolute; left:0;top:0;right:0;bottom:0; background: rgba(0,0,0,0.45); display:flex; align-items:center; justify-content:center; padding:20px; transition: opacity 200ms ease; }
-            #dy-template-modal .dy-tpl-box { width: min(900px, 96%); background: linear-gradient(180deg,#0f1114,#09090a); color:#fff; border-radius:10px; padding:12px; box-shadow:0 14px 50px rgba(0,0,0,0.6); max-height:90vh; overflow:auto; transition: all 0.3s ease; }
-            #dy-template-modal .dy-tpl-box.dy-fullscreen { width: 100%; height: 100%; max-width: 100%; max-height: 100%; border-radius: 0; display: flex; flex-direction: column; }
+            #dy-template-modal .dy-tpl-box { 
+                width: min(900px, 96%); 
+                height: min(600px, 80vh);
+                background: linear-gradient(180deg,#0f1114,#09090a); 
+                color:#fff; 
+                border-radius:12px; 
+                padding:16px; 
+                box-shadow:0 14px 50px rgba(0,0,0,0.6); 
+                max-height:90vh; 
+                overflow:auto; 
+                transition: all 0.3s ease;
+                display: flex;
+                flex-direction: column;
+            }
+            #dy-template-modal .dy-tpl-box.dy-fullscreen { width: 100%; height: 100%; max-width: 100%; max-height: 100%; border-radius: 0; }
             #dy-template-modal .dy-tpl-box.dy-fullscreen .dy-tpl-box-body { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
             #dy-template-modal .dy-tpl-box.dy-fullscreen .monaco-container { flex: 1; min-height: 200px; }
             #dy-template-modal .dy-tpl-box.dy-fullscreen .dy-tpl-preview { max-height: 150px; }
             #dy-template-modal .dy-tpl-box.dy-fullscreen .dy-tpl-box-foot { position: sticky; bottom: 0; background: inherit; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.1); }
-            #dy-template-modal .dy-tpl-box-controls { display: flex; gap: 8px; }
+            #dy-template-modal .dy-tpl-box-controls { display: flex; gap: 8px; flex-wrap: wrap; }
             #dy-template-modal .dy-tpl-fullscreen { font-size: 14px; padding: 6px 10px; }
             #dy-template-modal.dy-theme-light .dy-tpl-box { background: #fff; color:#111 }
-            #dy-template-modal .dy-tpl-box-header{ display:flex; justify-content:space-between; align-items:center; margin-bottom:8px }
-            #dy-template-modal textarea{ width:100%; box-sizing:border-box; min-height:120px; max-height:60vh; resize:vertical; padding:8px; border-radius:6px; font-size:13px; font-family: Consolas, "Courier New", monospace }
-            #dy-template-modal .dy-tpl-box-body{ margin-bottom:8px }
-            #dy-template-modal .dy-tpl-box-foot{ text-align:right }
-            #dy-template-modal .dy-tpl-desc{ font-size:13px; color: #cfd8e3 }
-            #dy-template-modal .dy-tpl-syntax{ display:flex; gap:8px; flex-wrap:wrap; margin:8px 0 6px }
-            #dy-template-modal .dy-tpl-syntax button{ background: rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.04); color:inherit; padding:6px 8px; border-radius:6px; cursor:pointer; font-size:13px }
-            #dy-template-modal.dy-theme-light .dy-tpl-syntax button{ background: rgba(0,0,0,0.03); border:1px solid rgba(0,0,0,0.06) }
-            #dy-template-modal .dy-tpl-preview{ margin-top:8px; padding:8px; background: rgba(0,0,0,0.06); border-radius:6px; font-family: Consolas, "Courier New", monospace; font-size:13px; color:#e6eef8; max-height:160px; overflow:auto }
+            #dy-template-modal .dy-tpl-box-header{ display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap: wrap; gap: 8px; }
+            #dy-template-modal textarea{ width:100%; box-sizing:border-box; min-height:120px; max-height:60vh; resize:vertical; padding:10px; border-radius:8px; font-size:13px; font-family: Consolas, "Courier New", monospace; transition: border-color 0.2s; }
+            #dy-template-modal textarea:focus { border-color: rgba(255,107,139,0.5); outline: none; }
+            #dy-template-modal .dy-tpl-box-body{ margin-bottom:12px; flex: 1; display: flex; flex-direction: column; }
+            #dy-template-modal .dy-tpl-box-foot{ text-align:right; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.05); }
+            #dy-template-modal .dy-tpl-desc{ font-size:13px; color: #cfd8e3; margin-bottom: 10px; }
+            #dy-template-modal .dy-tpl-preview{ margin-top:12px; padding:10px; background: rgba(0,0,0,0.08); border-radius:8px; font-family: Consolas, "Courier New", monospace; font-size:13px; color:#e6eef8; max-height:200px; overflow:auto; }
             #dy-template-modal.dy-theme-light .dy-tpl-preview{ background:#f6f7f9; color:#111 }
             /* 设置定时发送等控件响应换行，避免溢出 */
             .dy-panel .dy-settings{ display:flex; flex-direction:column; gap:8px; padding-top:6px }
@@ -260,9 +586,24 @@
             .dy-panel.dy-theme-light input, .dy-panel.dy-theme-light textarea{ background: #fff; border:1px solid rgba(0,0,0,0.08); color:#111 }
             .dy-panel.dy-theme-light .dy-btn{ color:#fff }
             /* 最小化时隐藏主体和 resizer，避免黑色矩形 */
-            .dy-panel .dy-root.dy-minimized { height: auto; overflow: visible; background: transparent; box-shadow: none; padding:6px 10px }
-            .dy-panel .dy-root.dy-minimized .dy-body, .dy-panel .dy-root.dy-minimized .dy-template-editor { display: none }
+            .dy-panel .dy-root.dy-minimized { 
+                height: auto !important; 
+                overflow: visible; 
+                background: transparent; 
+                box-shadow: none; 
+                padding:6px 10px;
+                min-height: auto;
+            }
+            .dy-panel .dy-root.dy-minimized .dy-body, 
+            .dy-panel .dy-root.dy-minimized .dy-template-editor,
+            .dy-panel .dy-root.dy-minimized .dy-settings-bottom { 
+                display: none !important; 
+            }
             .dy-panel .dy-root.dy-minimized .dy-resizer { display: none }
+            .dy-panel .dy-root.dy-minimized .dy-header { margin-bottom: 0; }
+            /* Panel 容器在最小化时也自动调整高度 */
+            .dy-panel.dy-minimized { height: auto !important; }
+            .dy-panel.dy-minimized > .dy-root { height: auto !important; }
             /* 将列表与其它区域视觉切割 */
             .dy-panel .dy-column{ box-shadow: inset 0 1px 0 rgba(255,255,255,0.02); }
             /* CodeMirror 占位符高亮 */
@@ -334,6 +675,7 @@
         if (!resizer) {
             resizer = document.createElement('div');
             resizer.className = 'dy-resizer';
+            resizer.title = '拖动调整大小';
             panel.appendChild(resizer);
         }
         let resizing = false, startW = 0, startH = 0, startX = 0, startY = 0;
@@ -342,25 +684,31 @@
             const rect = panel.getBoundingClientRect();
             startW = rect.width; startH = rect.height; startX = e.clientX; startY = e.clientY;
             document.body.style.userSelect = 'none';
+            resizer.style.background = 'linear-gradient(135deg, rgba(255,107,139,0.4), rgba(255,44,84,0.4))';
             e.preventDefault();
         });
         document.addEventListener('mousemove', (e) => {
             if (!resizing) return;
             const dx = e.clientX - startX; const dy = e.clientY - startY;
-            const newW = Math.max(320, Math.min(window.innerWidth - 40, startW + dx));
-            const newH = Math.max(160, Math.min(window.innerHeight - 40, startH + dy));
+            const newW = Math.max(400, Math.min(window.innerWidth - 40, startW + dx));
+            const newH = Math.max(300, Math.min(window.innerHeight - 40, startH + dy));
             panel.style.width = newW + 'px';
             panel.style.height = newH + 'px';
         });
-        document.addEventListener('mouseup', () => { resizing = false; document.body.style.userSelect = '';
-            // 保存尺寸
-            try {
-                const rect = panel.getBoundingClientRect();
-                settings.panel = settings.panel || {};
-                settings.panel.width = Math.round(Math.min(rect.width, window.innerWidth - 40));
-                settings.panel.height = Math.round(Math.min(rect.height, window.innerHeight - 40));
-                saveSettings();
-            } catch (e) {}
+        document.addEventListener('mouseup', () => { 
+            if (resizing) {
+                resizing = false; 
+                document.body.style.userSelect = '';
+                resizer.style.background = '';
+                // 保存尺寸
+                try {
+                    const rect = panel.getBoundingClientRect();
+                    settings.panel = settings.panel || {};
+                    settings.panel.width = Math.round(Math.min(rect.width, window.innerWidth - 40));
+                    settings.panel.height = Math.round(Math.min(rect.height, window.innerHeight - 40));
+                    saveSettings();
+                } catch (e) {}
+            }
         });
     }
 
@@ -392,25 +740,19 @@
         const root = panel.querySelector('.dy-root');
         if (!root) return;
         const minimized = root.classList.toggle('dy-minimized');
+        // 同时在 panel 上添加类，确保 CSS 生效
+        if (minimized) {
+            panel.classList.add('dy-minimized');
+        } else {
+            panel.classList.remove('dy-minimized');
+        }
         settings.panel = settings.panel || {};
         settings.panel.minimized = minimized;
         saveSettings();
-        // 简单实现：隐藏 body 与 template-editor
-        const body = root.querySelector('.dy-body');
-        const tpl = root.querySelector('.dy-template-editor');
-        const settingsEl = root.querySelector('.dy-settings');
+        // 最小化时只保留 header
         if (minimized) {
-            if (body) body.style.display = 'none';
-            if (tpl) tpl.style.display = 'none';
-            if (settingsEl) settingsEl.style.display = 'none';
-            // 关闭模态（如果打开）并隐藏整个面板可确保视觉最小化
+            // 关闭模态（如果打开）
             try { closeTemplateModal(); } catch (e) {}
-            // 不再隐藏整个面板（避免用户误解为关闭），仅收缩为头部视图
-        } else {
-            if (body) body.style.display = '';
-            if (tpl) tpl.style.display = 'none';
-            if (settingsEl) settingsEl.style.display = '';
-            // 保持 panel 可见
         }
     }
 
@@ -638,24 +980,23 @@
         // 创建弹窗
         const overlay = document.createElement('div');
         overlay.className = 'dy-update-dialog-overlay';
-        overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
-        
+
         const dialog = document.createElement('div');
-        dialog.style.cssText = 'background:#1c1c22;border-radius:12px;padding:24px;max-width:500px;box-shadow:0 8px 32px rgba(0,0,0,0.4);';
-        
+        dialog.className = 'dy-update-dialog';
+
         dialog.innerHTML = `
-            <h3 style="color:#fff;margin:0 0 16px 0;font-size:18px;">更新 "${escapeHtml(targetOldName)}" 的名字</h3>
-            <p style="color:#aaa;font-size:13px;margin-bottom:16px;">从列表中选择一个新名字</p>
-            <div style="max-height:400px;overflow-y:auto;">
+            <h3 class="dy-update-title">更新 "${escapeHtml(targetOldName)}" 的名字</h3>
+            <p class="dy-update-desc">从列表中选择一个新名字</p>
+            <div class="dy-update-list">
                 ${pageUsers.map(user => `
-                    <div class="dy-user-item" data-name="${escapeAttr(user.name)}" data-avatar="${escapeAttr(user.avatar)}" style="display:flex;align-items:center;padding:10px;margin:6px 0;background:rgba(255,255,255,0.05);border-radius:8px;cursor:pointer;transition:background 0.2s;">
-                        <img src="${escapeAttr(user.avatar)}" style="width:40px;height:40px;border-radius:50%;margin-right:12px;" />
-                        <span style="color:#fff;font-size:14px;">${escapeHtml(user.name)}</span>
+                    <div class="dy-user-item" data-name="${escapeAttr(user.name)}" data-avatar="${escapeAttr(user.avatar)}">
+                        <img src="${escapeAttr(user.avatar)}" alt="avatar" />
+                        <span>${escapeHtml(user.name)}</span>
                     </div>
                 `).join('')}
             </div>
-            <div style="margin-top:16px;text-align:right;">
-                <button class="dy-cancel-update-btn" style="padding:8px 20px;background:#6c757d;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:14px;">取消</button>
+            <div class="dy-update-footer">
+                <button class="dy-cancel-update-btn">取消</button>
             </div>
         `;
         
@@ -983,6 +1324,7 @@
                         <button id="dy-fetch-chats" class="dy-btn dy-btn-light">抓取聊天</button>
                         <button id="dy-batch-send" class="dy-btn dy-btn-light">批量发送选中</button>
                         <button id="dy-macro-manager" class="dy-btn dy-btn-macro">宏管理</button>
+                        <button id="dy-var-manager" class="dy-btn dy-btn-macro">变量管理</button>
                         <button id="dy-theme-toggle" class="dy-btn dy-btn-light">主题</button>
                         <button id="dy-minimize" class="dy-btn dy-btn-light">—</button>
                         <button id="dy-close-panel" class="dy-btn dy-btn-light">×</button>
@@ -993,19 +1335,23 @@
                         <div class="dy-title">暂存列表</div>
                         <div class="dy-select-all">
                             <label><input type="checkbox" id="dy-select-all"/> 全选/反选</label>
-                            <button id="dy-select-added-targets" class="dy-btn dy-btn-light" style="margin-left: 10px; padding: 4px 8px; font-size: 11px;">已添加目标全选</button>
+                            <button id="dy-select-added-targets" class="dy-btn dy-btn-light">已添加目标全选</button>
                         </div>
-                        <ul id="dy-staged-list" class="dy-list"></ul>
+                        <div class="dy-list-container">
+                            <ul id="dy-staged-list" class="dy-list dy-scroll-list"></ul>
+                        </div>
                     </div>
                     <div class="dy-column dy-persist">
                         <div class="dy-title">续火花目标</div>
-                        <ul id="dy-persist-list" class="dy-list"></ul>
+                        <div class="dy-list-container">
+                            <ul id="dy-persist-list" class="dy-list dy-scroll-list"></ul>
+                        </div>
                     </div>
                 </div>
                 <div class="dy-settings dy-settings-bottom">
                     <div class="dy-settings-row">
                         <label>发送模式:</label>
-                        <select id="dy-send-mode" style="width:120px">
+                        <select id="dy-send-mode">
                             <option value="scheduled">定时发送</option>
                             <option value="automatic">自动发送</option>
                         </select>
@@ -1017,7 +1363,7 @@
                     </div>
                     <div class="dy-settings-row">
                         <label>每条间隔 (秒):</label>
-                        <input id="dy-interval-sec" type="number" min="1" value="3" style="width:60px" />
+                        <input id="dy-interval-sec" type="number" min="1" value="3" />
                         <button id="dy-toggle-scheduler" class="dy-btn">启用定时</button>
                         <span id="dy-scheduler-status" class="dy-status"></span>
                     </div>
@@ -1025,10 +1371,10 @@
                         <label><input id="dy-follow-system" type="checkbox" /> 跟随系统主题</label>
                     </div>
                 </div>
-                <div id="dy-template-editor" class="dy-template-editor" style="display:none">
+                <div id="dy-template-editor" class="dy-template-editor dy-hidden">
                     <div class="dy-tpl-desc">为 <span id="dy-editor-target"></span> 编辑模板（支持 $date $targetName $sinceDate("YYYY-M-D") 和直接JavaScript代码）</div>
                     <textarea id="dy-editor-text"></textarea>
-                    <div style="text-align:right;margin-top:6px"><button id="dy-save-template" class="dy-btn">保存模板</button></div>
+                    <div class="dy-text-right"><button id="dy-save-template" class="dy-btn">保存模板</button></div>
                 </div>
                 <div class="dy-resizer" title="拖动调整大小"></div>
             </div>
@@ -1048,12 +1394,16 @@
             if (settings.panel.top) panel.style.top = settings.panel.top + 'px';
             if (settings.panel.width) panel.style.width = settings.panel.width + 'px';
             if (settings.panel.height) panel.style.height = settings.panel.height + 'px';
-            if (settings.panel.minimized) root.classList.add('dy-minimized');
+            if (settings.panel.minimized) {
+                root.classList.add('dy-minimized');
+                panel.classList.add('dy-minimized');
+            }
         } else {
             // 默认位置
             panel.style.right = '20px';
             panel.style.top = '60px';
-            panel.style.width = '540px';
+            panel.style.width = '680px';
+            panel.style.height = '520px';
         }
 
         // 应用主题调色（兼容旧内联样式）
@@ -1108,6 +1458,10 @@
         const macroManagerBtn = document.getElementById('dy-macro-manager');
         if (macroManagerBtn) macroManagerBtn.addEventListener('click', () => {
             openMacroManagerModal();
+        });
+        const varManagerBtn = document.getElementById('dy-var-manager');
+        if (varManagerBtn) varManagerBtn.addEventListener('click', () => {
+            openVarManagerPanel();
         });
         const followCb = document.getElementById('dy-follow-system');
         if (followCb) {
@@ -1213,7 +1567,6 @@
                 ul.style.padding = '6px';
                 ul.style.margin = '0';
                 ul.style.maxHeight = ul.style.maxHeight || '260px';
-                ul.style.overflow = 'auto';
             });
 
             // list items 调整
@@ -1297,6 +1650,84 @@
         });
         return window.__dy_monaco_promise;
     }
+
+    // 注册或刷新全局补全 provider（供所有 Monaco 实例使用）
+    function __dy_refreshMonacoCompletions() {
+        try {
+            if (typeof monaco === 'undefined') return;
+            // 清理之前的全局 disposable
+            if (window.__dy_monaco_global_completion_disposable) {
+                try { window.__dy_monaco_global_completion_disposable.dispose(); } catch (e) {}
+                window.__dy_monaco_global_completion_disposable = null;
+            }
+
+            // 注册统一的补全 provider，动态读取最新的 customVars/macros
+            const disposable = monaco.languages.registerCompletionItemProvider('javascript', {
+                provideCompletionItems: function(model, position) {
+                    const word = model.getWordUntilPosition(position);
+                    const range = {
+                        startLineNumber: position.lineNumber,
+                        endLineNumber: position.lineNumber,
+                        startColumn: word.startColumn,
+                        endColumn: word.endColumn
+                    };
+
+                    const suggestions = [];
+
+                    // 系统变量
+                    try {
+                        Object.keys(SYSTEM_VARS || {}).forEach(k => {
+                            suggestions.push({ label: `$${k}`, kind: monaco.languages.CompletionItemKind.Variable, insertText: `$${k}`, range });
+                        });
+                    } catch (e) {}
+
+                    // 自定义变量
+                    try {
+                        Object.entries(customVars || {}).forEach(([k, v]) => {
+                            suggestions.push({ label: `$${k}`, kind: (v && v.type === 'function') ? monaco.languages.CompletionItemKind.Function : monaco.languages.CompletionItemKind.Variable, insertText: (v && k === 'sinceDate') ? `$sinceDate("YYYY-M-D")` : `$${k}`, range, documentation: (v && v.description) || '' });
+                        });
+                    } catch (e) {}
+
+                    // 宏名作为函数补全
+                    try {
+                        Object.keys(macros || {}).forEach(m => {
+                            suggestions.push({ label: m, kind: monaco.languages.CompletionItemKind.Function, insertText: `${m}()`, range });
+                        });
+                    } catch (e) {}
+
+                    return { suggestions };
+                }
+            });
+
+            window.__dy_monaco_global_completion_disposable = disposable;
+            
+            // 触发所有 Monaco 编辑器实例刷新补全缓存（不强制弹出建议框）
+            setTimeout(() => {
+                try {
+                    // 触发所有 Monaco 编辑器的补全缓存更新
+                    if (monaco.editor) {
+                        const editors = monaco.editor.getEditors();
+                        if (editors && editors.length > 0) {
+                            editors.forEach(editor => {
+                                try {
+                                    // 触发补全提供器刷新，但不自动弹出建议框
+                                    const model = editor.getModel();
+                                    if (model) {
+                                        // 通过触发一个虚拟的输入事件来刷新补全缓存
+                                        monaco.languages.trigger('javascript');
+                                    }
+                                } catch (e) {}
+                            });
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[DouYinSpark] 触发 Monaco 补全刷新失败', e);
+                }
+            }, 100);
+        } catch (e) {
+            console.error('[DouYinSpark] 刷新 Monaco 补全失败', e);
+        }
+    }
     
 
 
@@ -1328,17 +1759,12 @@
         modal.innerHTML = `
             <div class="dy-tpl-overlay">
                 <div class="dy-tpl-box">
-                    <div class="dy-tpl-box-header"><strong>编辑模板</strong><div class="dy-tpl-box-controls"><button id="dy-tpl-fullscreen" class="dy-btn dy-btn-light" title="全屏显示">⛶</button><button id="dy-tpl-cancel" class="dy-btn dy-btn-light">取消</button></div></div>
+                    <div class="dy-tpl-box-header"><strong>编辑模板</strong><div class="dy-tpl-box-controls"><button id="dy-tpl-var-manager" class="dy-btn dy-btn-macro" title="管理自定义变量">变量管理</button><button id="dy-tpl-fullscreen" class="dy-btn dy-btn-light" title="全屏显示">⛶</button><button id="dy-tpl-cancel" class="dy-btn dy-btn-light">取消</button></div></div>
                     <div class="dy-tpl-box-body">
-                        <div class="dy-tpl-desc">为 <span id="dy-modal-editor-target"></span> 编辑模板（支持 $date $targetName $sinceDate("YYYY-M-D") 和直接JavaScript代码）</div>
-                        <div class="dy-tpl-syntax">
-                            <button id="dy-tpl-ins-date" title="插入当前日期">$date</button>
-                            <button id="dy-tpl-ins-target" title="插入对方名称">$targetName</button>
-                            <button id="dy-tpl-ins-since" title='插入相识天数'>$sinceDate("YYYY-M-D")</button>
-                        </div>
+                        <div class="dy-tpl-desc">为 <span id="dy-modal-editor-target"></span> 编辑模板（支持 $date $targetName $sinceDate("YYYY-M-D") 和直接 JavaScript 代码）</div>
                         <!-- Monaco Editor 容器 -->
-                        <div id="dy-modal-editor-monaco" class="monaco-container" style="width:100%;min-height:120px;height:300px"></div>
-                        <textarea id="dy-modal-editor-text" rows="8" style="display:none"></textarea>
+                        <div id="dy-modal-editor-monaco" class="monaco-container h300"></div>
+                        <textarea id="dy-modal-editor-text" rows="8" class="dy-hidden"></textarea>
                         <div id="dy-modal-preview" class="dy-tpl-preview" aria-live="polite"></div>
                     </div>
                     <div class="dy-tpl-box-foot"><button id="dy-tpl-save" class="dy-btn dy-btn-send">保存 (Ctrl+S)</button></div>
@@ -1351,74 +1777,9 @@
         document.getElementById('dy-tpl-cancel').addEventListener('click', closeTemplateModal);
         document.getElementById('dy-tpl-save').addEventListener('click', saveTemplateForActive);
         document.getElementById('dy-tpl-fullscreen').addEventListener('click', toggleFullscreen);
-
-        // 语法插入按钮与实时预览（支持 Monaco Editor）
-        const ta = document.getElementById('dy-modal-editor-text');
-        const monacoContainer = document.getElementById('dy-modal-editor-monaco');
-        const preview = document.getElementById('dy-modal-preview');
-        let __dyEditor = null;
-
-        function insertToEditor(text) {
-            // 优先使用 Monaco Editor
-            if (window.__dy_monaco_editor && window.__dy_monaco_editor.getModel) {
-                const model = window.__dy_monaco_editor.getModel();
-                const position = window.__dy_monaco_editor.getPosition();
-                const range = new monaco.Range(
-                    position.lineNumber,
-                    position.column,
-                    position.lineNumber,
-                    position.column
-                );
-                model.pushEditOperations([], [{
-                    range: range,
-                    text: text
-                }]);
-                window.__dy_monaco_editor.focus();
-
-                // 同步到textarea
-                if (ta) {
-                    ta.value = model.getValue();
-                }
-
-                // 更新预览
-                updateModalPreview();
-                return;
-            }
-
-            // 回退到textarea
-            try {
-                const start = ta.selectionStart || 0;
-                const end = ta.selectionEnd || 0;
-                const val = ta.value || '';
-                ta.value = val.slice(0, start) + text + val.slice(end);
-                const pos = start + text.length;
-                ta.selectionStart = ta.selectionEnd = pos;
-                ta.focus();
-
-                // 更新预览
-                updateModalPreview();
-            } catch (e) { 
-                if (ta) { 
-                    ta.value += text; 
-                    // 更新预览
-                    updateModalPreview(); 
-                } 
-            }
-        }
-
-
-
-        // Monaco Editor 将在第一次打开模态框时初始化
-
-
-        const btnDate = document.getElementById('dy-tpl-ins-date');
-        const btnTarget = document.getElementById('dy-tpl-ins-target');
-        const btnSince = document.getElementById('dy-tpl-ins-since');
-        const btnIf = document.getElementById('dy-tpl-ins-if');
-        const btnJs = document.getElementById('dy-tpl-ins-js');
-        if (btnDate) btnDate.addEventListener('click', () => insertToEditor('$date'));
-        if (btnTarget) btnTarget.addEventListener('click', () => insertToEditor('$targetName'));
-        if (btnSince) btnSince.addEventListener('click', () => insertToEditor('$sinceDate("YYYY-M-D")'));
+        document.getElementById('dy-tpl-var-manager').addEventListener('click', () => {
+            openVarManagerPanel();
+        });
 
         // 键盘监听（全局但仅在模态开启时生效）
         modal._kbdHandler = function(e) {
@@ -1498,31 +1859,27 @@
                             endColumn: word.endColumn
                         };
                         
-                        return {
-                            suggestions: [
-                                {
-                                    label: '$date',
-                                    kind: monaco.languages.CompletionItemKind.Keyword,
-                                    insertText: '$date',
-                                    range: range,
-                                    documentation: '当前日期'
-                                },
-                                {
-                                    label: '$targetName',
-                                    kind: monaco.languages.CompletionItemKind.Keyword,
-                                    insertText: '$targetName',
-                                    range: range,
-                                    documentation: '对象名称'
-                                },
-                                {
-                                    label: '$sinceDate("YYYY-M-D")',
-                                    kind: monaco.languages.CompletionItemKind.Keyword,
-                                    insertText: '$sinceDate("YYYY-M-D")',
-                                    range: range,
-                                    documentation: '相识天数'
-                                }
-                            ]
-                        };
+                        // 合并系统变量和自定义变量
+                        const allVars = { ...SYSTEM_VARS, ...customVars };
+                        
+                        const suggestions = [];
+                        
+                        // 添加所有变量补全（包括系统变量）
+                        Object.entries(allVars).forEach(([varName, varData]) => {
+                            let insertText = `$${varName}`;
+                            if (varName === 'sinceDate') {
+                                insertText = '$sinceDate("YYYY-M-D")';
+                            }
+                            suggestions.push({
+                                label: `$${varName}`,
+                                kind: varData.type === 'function' ? monaco.languages.CompletionItemKind.Function : monaco.languages.CompletionItemKind.Variable,
+                                insertText: insertText,
+                                range: range,
+                                documentation: varData.description || (varData.type === 'function' ? `自定义函数：${varData.value}()` : `自定义变量：${varData.value}`)
+                            });
+                        });
+                        
+                        return { suggestions };
                     }
                 });
                 
@@ -1718,9 +2075,10 @@
         modal.innerHTML = `
             <div class="dy-macro-overlay">
                 <div class="dy-macro-box">
-                    <div class="dy-macro-box-header">
+                        <div class="dy-macro-box-header">
                         <strong>宏管理系统</strong>
                         <div class="dy-macro-box-controls">
+                            <button id="dy-open-macro-popup" class="dy-btn dy-btn-add">新建宏</button>
                             <button id="dy-macro-cancel" class="dy-btn dy-btn-light">关闭</button>
                         </div>
                     </div>
@@ -1728,21 +2086,12 @@
                         <div class="dy-macro-body">
                             <div class="dy-macro-column manage-macros">
                                 <div class="dy-title">管理宏</div>
-                                <ul id="dy-manage-macros-list" class="dy-list"></ul>
-                                <div class="dy-macro-form">
-                                    <input type="text" id="dy-macro-name" placeholder="宏名称" />
-                                    <input type="text" id="dy-macro-desc" placeholder="宏描述（可选）" />
-                                    <div id="dy-macro-editor-container" class="monaco-container" style="width:100%;min-height:120px;height:200px;margin-top:8px"></div>
-                                    <textarea id="dy-macro-code" placeholder="宏代码..." style="display:none;width:100%;min-height:120px;margin-top:8px"></textarea>
-                                    <div class="dy-macro-form-buttons" style="text-align:right;margin-top:8px">
-                                        <button id="dy-save-macro" class="dy-btn">保存宏</button>
-                                        <button id="dy-clear-macro-form" class="dy-btn dy-btn-light">清空</button>
-                                    </div>
-                                </div>
+                                <ul id="dy-manage-macros-list" class="dy-list dy-scroll-list"></ul>
+                                <!-- Inline macro form removed; use popup editor instead -->
                             </div>
                             <div class="dy-macro-column apply-macros">
                                 <div class="dy-title">应用宏</div>
-                                <ul id="dy-apply-macros-list" class="dy-list"></ul>
+                                <ul id="dy-apply-macros-list" class="dy-list dy-scroll-list"></ul>
                             </div>
                         </div>
                     </div>
@@ -1805,6 +2154,28 @@
                     color:#111827;
                     border: 1px solid rgba(0,0,0,0.08);
                 }
+                #dy-macro-modal.dy-theme-light .dy-btn-light {
+                    background: linear-gradient(90deg, rgb(55, 65, 81), rgb(75, 85, 99));
+                    border: none;
+                    color: #fff;
+                }
+                #dy-macro-modal.dy-theme-light .dy-btn-light:hover {
+                    background: linear-gradient(90deg, rgb(75, 85, 99), rgb(107, 114, 128));
+                }
+                #dy-macro-modal.dy-theme-light .dy-macro-column {
+                    background: rgba(0,0,0,0.02);
+                    border: 1px solid rgba(0,0,0,0.08);
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.04);
+                }
+                #dy-macro-modal.dy-theme-light .dy-macro-item {
+                    background: #ffffff;
+                    border: 1px solid rgba(0,0,0,0.12);
+                    color: #1f2937;
+                }
+                #dy-macro-modal.dy-theme-light .dy-macro-item:hover {
+                    background: rgba(0,0,0,0.08);
+                    border-color: rgba(0,0,0,0.2);
+                }
                 #dy-macro-modal .dy-macro-box-body {
                     margin-bottom:8px
                 }
@@ -1830,10 +2201,10 @@
                     border-color: rgba(255,255,255,0.1);
                 }
                 .dy-macro-column.manage-macros {
-                    border-right: 2px solid rgba(139, 92, 246, 0.2);
+                    border-right: 2px solid rgba(139, 92, 246, 0.12);
                 }
                 .dy-macro-column.apply-macros {
-                    border-left: 2px solid rgba(59, 130, 246, 0.2);
+                    border-left: 2px solid rgba(59, 130, 246, 0.12);
                 }
                 .dy-macro-header {
                     display: flex;
@@ -1844,7 +2215,7 @@
                 .dy-macro-title {
                     font-size: 16px;
                     font-weight: 600;
-                    color: #c7d2fe;
+                    color: var(--dy-accent1);
                     display: flex;
                     align-items: center;
                 }
@@ -1870,7 +2241,7 @@
                     left: 0;
                     width: 3px;
                     height: 100%;
-                    background: linear-gradient(to bottom, #8b5cf6, #3b82f6);
+                    background: linear-gradient(to bottom, var(--dy-macro1), var(--dy-macro2));
                 }
                 .dy-macro-item:hover {
                     background: rgba(255,255,255,0.06);
@@ -1893,24 +2264,37 @@
                 .dy-macro-item-name {
                     font-weight: 600;
                     margin-bottom: 4px;
-                    color: #e0e7ff;
+                    color: gray;
                     font-size: 14px;
+                }
+                .dy-macro-item-name.dy-theme-light {
+                    color: #111827;
+                    font-weight: 600;
                 }
                 .dy-macro-item-desc {
                     font-size: 13px;
-                    color: #94a3b8;
+                    color: var(--dy-muted);
                     margin-bottom: 6px;
+                }
+                .dy-macro-item-desc.dy-theme-light {
+                    color: #4b5563;
+                    font-weight: 500;
                 }
                 .dy-macro-item-code {
                     font-family: 'Fira Code', 'Consolas', monospace;
                     font-size: 12px;
-                    background: rgba(0,0,0,0.3);
+                    background: rgba(0,0,0,0.18);
                     padding: 6px;
                     border-radius: 4px;
                     overflow: auto;
                     max-height: 80px;
-                    color: #cbd5e1;
-                    border: 1px solid rgba(255,255,255,0.05);
+                    color: var(--dy-text);
+                    border: 1px solid rgba(255,255,255,0.04);
+                }
+                .dy-macro-item-code.dy-theme-light {
+                    background: rgba(0,0,0,0.04);
+                    border: 1px solid rgba(0,0,0,0.1);
+                    color: #1f2937;
                 }
                 .dy-macro-item-templates {
                     font-size: 11px;
@@ -1943,33 +2327,7 @@
                     border-radius: 6px;
                     min-width: 50px;
                 }
-                .dy-macro-form {
-                    margin-top: 16px;
-                    padding: 12px;
-                    background: rgba(0,0,0,0.2);
-                    border-radius: 8px;
-                    border: 1px solid rgba(255,255,255,0.08);
-                }
-                .dy-macro-form input,
-                .dy-macro-form textarea {
-                    width: 100%;
-                    box-sizing: border-box;
-                    margin-bottom: 8px;
-                    padding: 10px;
-                    border-radius: 6px;
-                    background: rgba(0,0,0,0.3);
-                    border: 1px solid rgba(255,255,255,0.1);
-                    color: #e6eef8;
-                }
-                .dy-macro-form textarea {
-                    min-height: 120px;
-                    font-family: 'Fira Code', 'Consolas', monospace;
-                    font-size: 13px;
-                }
-                .dy-macro-form-buttons {
-                    text-align: right;
-                    margin-top: 8px;
-                }
+                /* Inline macro form styles removed */
                 .dy-macro-select {
                     width: 100%;
                     padding: 10px;
@@ -1981,7 +2339,7 @@
                     margin-bottom: 8px;
                 }
                 .dy-macro-assign-btn {
-                    background: linear-gradient(90deg,#8b5cf6,#6366f1);
+                    background: gray
                     width: 100%;
                     margin-top: 4px;
                     padding: 10px;
@@ -1989,7 +2347,7 @@
                     font-weight: 500;
                 }
                 .dy-macro-clear-btn {
-                    background: linear-gradient(90deg,#f97316,#ea580c);
+                    background: gray;
                     width: 100%;
                     margin-top: 6px;
                     padding: 10px;
@@ -1997,14 +2355,8 @@
                     font-weight: 500;
                 }
                 .dy-macro-assign-btn:hover {
-                    background: linear-gradient(90deg,#7c3aed,#4f46e5);
                     transform: translateY(-1px);
-                    box-shadow: 0 4px 8px rgba(139, 92, 246, 0.3);
-                }
-                .dy-macro-clear-btn:hover {
-                    background: linear-gradient(90deg,#ea580c,#c2410c);
-                    transform: translateY(-1px);
-                    box-shadow: 0 4px 8px rgba(249, 115, 22, 0.3);
+                    box-shadow: 0 4px 8px rgba(0,0,0,0.12);
                 }
                 .dy-macro-toggle:hover {
                     background: linear-gradient(90deg,#4b5563,#374151);
@@ -2021,44 +2373,31 @@
                     transform: translateY(-1px);
                     box-shadow: 0 2px 6px rgba(239, 68, 68, 0.3);
                 }
-                .dy-macro-form input:focus,
-                .dy-macro-form textarea:focus,
-                .dy-macro-select:focus {
-                    outline: none;
-                    border-color: #8b5cf6;
-                    box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.3);
-                }
+                /* Inline macro form focus styles removed */
                 /* Light theme overrides */
                 .dy-macro-column.dy-theme-light {
-                    background: rgba(0,0,0,0.03);
-                    border: 1px solid rgba(0,0,0,0.06);
+                    background: rgba(0,0,0,0.02);
+                    border: 1px solid rgba(0,0,0,0.08);
                 }
                 .dy-macro-item.dy-theme-light {
-                    background: rgba(0,0,0,0.02);
-                    border: 1px solid rgba(0,0,0,0.05);
-                    color: #111827;
+                    background: #ffffff;
+                    border: 1px solid rgba(0,0,0,0.12);
+                    color: #1f2937;
                 }
                 .dy-macro-item-name.dy-theme-light {
                     color: #111827;
+                    font-weight: 600;
                 }
                 .dy-macro-item-desc.dy-theme-light {
-                    color: #6b7280;
+                    color: #4b5563;
+                    font-weight: 500;
                 }
                 .dy-macro-item-code.dy-theme-light {
-                    background: rgba(0,0,0,0.03);
-                    border: 1px solid rgba(0,0,0,0.05);
-                    color: #374151;
-                }
-                .dy-macro-form.dy-theme-light {
-                    background: rgba(0,0,0,0.02);
-                    border: 1px solid rgba(0,0,0,0.06);
-                }
-                .dy-macro-form input.dy-theme-light,
-                .dy-macro-form textarea.dy-theme-light {
-                    background: #ffffff;
+                    background: rgba(0,0,0,0.04);
                     border: 1px solid rgba(0,0,0,0.1);
-                    color: #111827;
+                    color: #1f2937;
                 }
+                /* Inline macro form light theme overrides removed */
                 .dy-macro-select.dy-theme-light {
                     background: #ffffff;
                     border: 1px solid rgba(0,0,0,0.1);
@@ -2079,22 +2418,17 @@
                 .dy-macro-column::-webkit-scrollbar-thumb:hover {
                     background: rgba(255,255,255,0.3);
                 }
+                /* Ensure macro lists scroll vertically and hide horizontal overflow */
+                #dy-manage-macros-list, #dy-apply-macros-list {
+                    /* replaced by .dy-scroll-list */
+                }
             `;
             document.head.appendChild(macroStyles);
         }
 
         // Event bindings for macro modal
         document.getElementById('dy-macro-cancel').addEventListener('click', closeMacroModal);
-        document.getElementById('dy-save-macro').addEventListener('click', saveMacroFromForm);
-        document.getElementById('dy-clear-macro-form').addEventListener('click', () => {
-            document.getElementById('dy-macro-name').value = '';
-            document.getElementById('dy-macro-desc').value = '';
-            if (window.__dy_macro_monaco_editor && window.__dy_macro_monaco_editor.getModel) {
-                window.__dy_macro_monaco_editor.getModel().setValue('');
-            } else {
-                document.getElementById('dy-macro-code').value = '';
-            }
-        });
+        // Legacy inline macro form removed; use popup editor instead
     }
 
     function openMacroManagerModal() {
@@ -2105,115 +2439,22 @@
         // Apply theme
         if (settings.theme === 'light') modal.classList.add('dy-theme-light'); else modal.classList.remove('dy-theme-light');
 
-        // Initialize Monaco Editor for macro code if not already done
-        const codeTextarea = document.getElementById('dy-macro-code');
-        const editorContainer = document.getElementById('dy-macro-editor-container');
-
-        if (!window.__dy_macro_monaco_editor) {
-            // Show textarea initially, Monaco will replace it
-            codeTextarea.style.display = 'block';
-            editorContainer.style.display = 'none';
-
-            // Load Monaco Editor for macro
-            loadMonacoEditorOnce().then((monaco) => {
-                if (!monaco) return;
-
-                // Initialize editor
-                const chosenTheme = (settings && settings.theme === 'light') ? 'dy-light' : 'dy-dark';
-
-                // Create editor instance for macro
-                window.__dy_macro_monaco_editor = monaco.editor.create(editorContainer, {
-                    value: codeTextarea.value,
-                    language: 'javascript',
-                    theme: chosenTheme,
-                    lineNumbers: 'on',
-                    wordWrap: 'on',
-                    minimap: { enabled: false },
-                    scrollBeyondLastLine: false,
-                    automaticLayout: true,
-                    suggestOnTriggerCharacters: true,
-                    quickSuggestions: true,
-                    parameterHints: { enabled: true },
-                });
-
-                // Add auto-completion for macro-specific keywords
-                monaco.languages.registerCompletionItemProvider('javascript', {
-                    provideCompletionItems: function(model, position) {
-                        const word = model.getWordUntilPosition(position);
-                        const range = {
-                            startLineNumber: position.lineNumber,
-                            endLineNumber: position.lineNumber,
-                            startColumn: word.startColumn,
-                            endColumn: word.endColumn
-                        };
-
-                        return {
-                            suggestions: [
-                                {
-                                    label: '$targetName',
-                                    kind: monaco.languages.CompletionItemKind.Variable,
-                                    insertText: '$targetName',
-                                    range: range,
-                                    documentation: '目标名称'
-                                },
-                                {
-                                    label: '$date',
-                                    kind: monaco.languages.CompletionItemKind.Variable,
-                                    insertText: '$date',
-                                    range: range,
-                                    documentation: '当前日期'
-                                },
-                                {
-                                    label: '$sinceDate("YYYY-M-D")',
-                                    kind: monaco.languages.CompletionItemKind.Function,
-                                    insertText: '$sinceDate("YYYY-M-D")',
-                                    range: range,
-                                    documentation: '相识天数'
-                                }
-                            ]
-                        };
-                    }
-                });
-
-                // Hide textarea and show editor
-                codeTextarea.style.display = 'none';
-                editorContainer.style.display = 'block';
-
-                // Sync changes between editor and textarea
-                const changeHandler = () => {
-                    const content = window.__dy_macro_monaco_editor.getModel().getValue();
-                    codeTextarea.value = content;
-                };
-
-                // Remove old listener if exists
-                if (window.__dy_macro_monaco_editor._changeDisposable) {
-                    window.__dy_macro_monaco_editor._changeDisposable.dispose();
-                }
-
-                // Add new listener
-                window.__dy_macro_monaco_editor._changeDisposable = window.__dy_macro_monaco_editor.onDidChangeModelContent(changeHandler);
-            });
-        } else {
-            // Monaco editor already exists, just update content and theme
-            if (window.__dy_macro_monaco_editor && window.__dy_macro_monaco_editor.getModel) {
-                // Update theme
-                const chosenTheme = (settings && settings.theme === 'light') ? 'dy-light' : 'dy-dark';
-                monaco.editor.setTheme(chosenTheme);
-
-                // Show editor and hide textarea
-                codeTextarea.style.display = 'none';
-                editorContainer.style.display = 'block';
-            } else {
-                // Fallback to textarea
-                codeTextarea.style.display = 'block';
-                editorContainer.style.display = 'none';
-            }
-        }
+        // Inline macro editor removed; popup editor is used instead
 
         // Show the modal
         modal.style.display = 'block';
         const overlay = modal.querySelector('.dy-macro-overlay');
         if (overlay) overlay.style.opacity = '1';
+
+        // Bind open popup button
+        const openBtn = document.getElementById('dy-open-macro-popup');
+        if (openBtn && !openBtn._bound) {
+            openBtn.addEventListener('click', () => {
+                ensureMacroEditPopupExists();
+                openMacroEditPopup();
+            });
+            openBtn._bound = true;
+        }
 
         // Render macro lists
         renderMacroLists();
@@ -2224,6 +2465,809 @@
         if (!modal) return;
         modal.style.display = 'none';
     }
+
+    // Variable Manager Functions
+    function ensureVarModalExists() {
+        if (document.getElementById('dy-var-modal')) return;
+        const modal = document.createElement('div');
+        modal.id = 'dy-var-modal';
+        modal.style.display = 'none';
+        modal.innerHTML = `
+            <div class="dy-var-overlay">
+                <div class="dy-var-box">
+                        <div class="dy-var-box-header">
+                        <strong>自定义变量管理</strong>
+                        <div class="dy-var-box-controls">
+                            <button id="dy-open-var-popup" class="dy-btn dy-btn-add">新建变量</button>
+                            <button id="dy-var-cancel" class="dy-btn dy-btn-light">关闭</button>
+                        </div>
+                    </div>
+                    <div class="dy-var-box-body">
+                        <div class="dy-var-body">
+                            <div class="dy-var-column manage-vars">
+                                <div class="dy-var-header">
+                                    <div class="dy-var-title">变量列表</div>
+                                </div>
+                                <ul id="dy-manage-vars-list" class="dy-list dy-scroll-list"></ul>
+                                <div class="dy-var-desc custom">
+                                    <strong>使用说明：</strong><br/>
+                                    • 变量类型：函数（Function）或变量（Variable）<br/>
+                                    • 函数：直接执行函数代码并返回结果，如 <code>$myFunc(123)</code><br/>
+                                    • 变量：计算表达式值，如 <code>$myVar</code><br/>
+                                    • 在模板中使用：<code>$varName</code>
+                                </div>
+                                <!-- Inline variable form removed; use popup editor instead -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+
+        // Add CSS for the variable modal
+        if (!document.getElementById('dy-var-styles')) {
+            const varStyles = document.createElement('style');
+            varStyles.id = 'dy-var-styles';
+            varStyles.innerHTML = `
+                #dy-var-modal {
+                    position: fixed;
+                    left: 0;
+                    top: 0;
+                    right: 0;
+                    bottom: 0;
+                    display: none;
+                    z-index: 10002;
+                }
+                #dy-var-modal .dy-var-overlay {
+                    position: absolute;
+                    left:0; top:0; right:0; bottom:0;
+                    background: rgba(0,0,0,0.65);
+                    display:flex;
+                    align-items:center;
+                    justify-content:center;
+                    padding:20px;
+                    transition: opacity 200ms ease;
+                }
+                #dy-var-modal .dy-var-box {
+                    width: min(900px, 96%);
+                    background: linear-gradient(160deg, var(--dy-bg1), var(--dy-bg2));
+                    color: var(--dy-text);
+                    border-radius:16px;
+                    padding:20px;
+                    box-shadow:0 20px 60px rgba(0,0,0,0.55);
+                    max-height:92vh;
+                    overflow:auto;
+                    transition: all 0.3s ease;
+                    border: 1px solid rgba(255,255,255,0.06);
+                    backdrop-filter: blur(10px);
+                }
+                #dy-var-modal .dy-var-box-header {
+                    display:flex;
+                    justify-content:space-between;
+                    align-items:center;
+                    margin-bottom:16px;
+                    padding-bottom: 16px;
+                    border-bottom: 1px solid rgba(255,255,255,0.1);
+                }
+                #dy-var-modal .dy-var-box-header strong {
+                    font-size: 18px;
+                    font-weight: 600;
+                    background: gray;
+                    -webkit-background-clip: text;
+                    -webkit-text-fill-color: transparent;
+                    background-clip: text;
+                }
+                #dy-var-modal .dy-var-box-controls {
+                    display:flex;
+                    gap: 8px;
+                }
+                #dy-var-modal .dy-var-box-body {
+                    overflow-y: auto;
+                    max-height: calc(92vh - 100px);
+                }
+                #dy-var-modal .dy-var-body {
+                    display: flex;
+                    gap: 20px;
+                }
+                #dy-var-modal .dy-var-column {
+                    flex: 1;
+                    min-width: 0;
+                }
+                #dy-var-modal .dy-var-header {
+                    margin-bottom: 12px;
+                }
+                #dy-var-modal .dy-var-title {
+                    font-size: 14px;
+                    font-weight: 600;
+                    color: var(--dy-accent1);
+                    margin-bottom: 8px;
+                }
+                #dy-var-modal .dy-list {
+                    list-style: none;
+                    padding: 0;
+                    margin: 0 0 16px 0;
+                    max-height: 300px;
+                    overflow-y: auto;
+                }
+                /* Ensure manage-vars list scrolls vertically and hides horizontal overflow (now shared via .dy-scroll-list) */
+                #dy-manage-vars-list { /* replaced by .dy-scroll-list */ }
+                #dy-var-modal .dy-var-item {
+                    padding: 14px;
+                    margin-bottom: 10px;
+                    background: rgba(255,255,255,0.03);
+                    border-radius: 10px;
+                    border: 1px solid rgba(255,255,255,0.08);
+                    transition: all 0.2s;
+                }
+                #dy-var-modal .dy-var-item:hover {
+                    background: rgba(255,255,255,0.05);
+                    border-color: var(--dy-accent1);
+                    transform: translateX(4px);
+                }
+                #dy-var-modal .dy-var-item-name {
+                    font-weight: 600;
+                    color: var(--dy-accent1);
+                    margin-bottom: 8px;
+                    font-size: 15px;
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                }
+                #dy-var-modal .dy-var-item-name::before {
+                    content: '$';
+                    color: var(--dy-accent2);
+                    font-weight: bold;
+                }
+                #dy-var-modal .dy-var-item-type {
+                    font-size: 10px;
+                    color: var(--dy-accent1);
+                    background: rgba(0,0,0,0.06);
+                    padding: 3px 8px;
+                    border-radius: 6px;
+                    display: inline-block;
+                    margin-bottom: 8px;
+                    font-weight: 500;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                }
+                #dy-var-modal .dy-var-item-value {
+                    font-size: 11px;
+                    color: var(--dy-text);
+                    background: rgba(0,0,0,0.18);
+                    padding: 10px;
+                    border-radius: 6px;
+                    overflow: auto;
+                    max-height: 100px;
+                    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+                    white-space: pre-wrap;
+                    word-break: break-all;
+                    border: 1px solid rgba(255,255,255,0.04);
+                }
+                #dy-var-modal .dy-var-item-desc {
+                    font-size: 10px;
+                    color: var(--dy-muted);
+                    margin-top: 6px;
+                    font-style: italic;
+                }
+                #dy-var-modal .dy-var-actions {
+                    display: flex;
+                    gap: 8px;
+                    margin-top: 12px;
+                    flex-wrap: wrap;
+                }
+                #dy-var-modal .dy-var-edit,
+                #dy-var-modal .dy-var-delete {
+                    padding: 6px 14px;
+                    font-size: 12px;
+                    border: none;
+                    border-radius: 8px;
+                    cursor: pointer;
+                    transition: all 0.2s;
+                    font-weight: 500;
+                }
+                #dy-var-modal .dy-var-edit {
+                    background: linear-gradient(135deg,var(--dy-accent2),var(--dy-accent1));
+                    color: #fff;
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+                }
+                #dy-var-modal .dy-var-edit:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 6px 16px rgba(0,0,0,0.16);
+                }
+                #dy-var-modal .dy-var-delete {
+                    background: linear-gradient(135deg,#f97316,#ef4444);
+                    color: #fff;
+                    box-shadow: 0 2px 8px rgba(249,115,22,0.2);
+                }
+                #dy-var-modal .dy-var-delete:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 6px 16px rgba(249,115,22,0.4);
+                }
+                /* Inline var form styles removed */
+                #dy-var-modal .dy-form-group {
+                    margin-bottom: 14px;
+                }
+                #dy-var-modal .dy-form-group label {
+                    display: block;
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: var(--dy-muted);
+                    margin-bottom: 6px;
+                    text-transform: uppercase;
+                    letter-spacing: 0.5px;
+                }
+                #dy-var-modal .dy-form-group input,
+                #dy-var-modal .dy-form-group select {
+                    width: 100%;
+                    padding: 10px 14px;
+                    border-radius: 8px;
+                    border: 1px solid rgba(255,255,255,0.1);
+                    background: rgba(0,0,0,0.3);
+                    color: #e6eef8;
+                    font-size: 13px;
+                    transition: all 0.2s;
+                    box-sizing: border-box;
+                }
+                #dy-var-modal .dy-form-group input:focus,
+                #dy-var-modal .dy-form-group select:focus {
+                    outline: none;
+                    border-color: var(--dy-accent1);
+                    box-shadow: 0 0 0 3px rgba(0,0,0,0.08);
+                }
+                #dy-var-modal .dy-form-group input::placeholder {
+                    color: #475569;
+                }
+                #dy-var-modal .monaco-container {
+                    border: 1px solid rgba(255,255,255,0.1);
+                    border-radius: 8px;
+                    overflow: hidden;
+                    background: rgba(0,0,0,0.3);
+                }
+                #dy-var-modal .monaco-container:focus-within {
+                    border-color: var(--dy-accent1);
+                    box-shadow: 0 0 0 3px rgba(0,0,0,0.08);
+                }
+                #dy-var-modal .dy-var-desc {
+                    background: rgba(0,0,0,0.06);
+                    padding: 12px;
+                    border-radius: 8px;
+                    border-left: 3px solid var(--dy-accent1);
+                    margin-bottom: 16px;
+                }
+                #dy-var-modal .dy-var-desc code {
+                    background: rgba(0,0,0,0.18);
+                    padding: 2px 6px;
+                    border-radius: 4px;
+                    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+                    font-size: 10px;
+                    color: var(--dy-accent1);
+                }
+                /* Light theme overrides for variable modal */
+                #dy-var-modal.dy-theme-light .dy-var-box {
+                    background: linear-gradient(160deg, #ffffff, #f8fafc);
+                    color: #111827;
+                    border: 1px solid rgba(0,0,0,0.08);
+                    box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+                }
+                #dy-var-modal.dy-theme-light .dy-var-box-header {
+                    border-bottom: 1px solid rgba(0,0,0,0.1);
+                }
+                #dy-var-modal.dy-theme-light .dy-var-column {
+                    background: rgba(0,0,0,0.02);
+                    border: 1px solid rgba(0,0,0,0.06);
+                    box-shadow: 0 4px 6px rgba(0,0,0,0.03);
+                }
+                #dy-var-modal.dy-theme-light .dy-var-item {
+                    background: rgba(0,0,0,0.02);
+                    border: 1px solid rgba(0,0,0,0.08);
+                }
+                #dy-var-modal.dy-theme-light .dy-var-item-name {
+                    color: #111827;
+                    font-weight: 600;
+                }
+                #dy-var-modal.dy-theme-light .dy-var-item:hover {
+                    background: rgba(0,0,0,0.08);
+                    border-color: rgba(0,0,0,0.2);
+                }
+                #dy-var-modal.dy-theme-light .dy-var-item-type {
+                    background: rgba(0,0,0,0.08);
+                    color: #1f2937;
+                    font-weight: 500;
+                }
+                #dy-var-modal.dy-theme-light .dy-var-item-value {
+                    background: rgba(0,0,0,0.08);
+                    border: 1px solid rgba(0,0,0,0.1);
+                    color: #1f2937;
+                }
+                #dy-var-modal.dy-theme-light .dy-var-item-desc {
+                    color: #4b5563;
+                    font-weight: 500;
+                }
+                #dy-var-modal.dy-theme-light .dy-form-group label {
+                    color: #374151;
+                }
+                #dy-var-modal.dy-theme-light .dy-form-group input,
+                #dy-var-modal.dy-theme-light .dy-form-group select {
+                    background: #ffffff;
+                    border: 1px solid rgba(0,0,0,0.12);
+                    color: #111827;
+                }
+                #dy-var-modal.dy-theme-light .dy-form-group input:focus,
+                #dy-var-modal.dy-theme-light .dy-form-group select:focus {
+                    border-color: var(--dy-accent1);
+                    box-shadow: 0 0 0 3px rgba(0,0,0,0.06);
+                }
+                #dy-var-modal.dy-theme-light .dy-form-group input::placeholder {
+                    color: #9ca3af;
+                }
+                #dy-var-modal.dy-theme-light .monaco-container {
+                    background: #ffffff;
+                    border: 1px solid rgba(0,0,0,0.12);
+                }
+                #dy-var-modal.dy-theme-light .monaco-container:focus-within {
+                    border-color: var(--dy-accent1);
+                    box-shadow: 0 0 0 3px rgba(0,0,0,0.06);
+                }
+                #dy-var-modal.dy-theme-light .dy-var-desc {
+                    background: rgba(0,0,0,0.03);
+                    border-left-color: var(--dy-accent1);
+                }
+                #dy-var-modal.dy-theme-light .dy-var-desc code {
+                    background: rgba(0,0,0,0.08);
+                    color: #1f2937;
+                    font-weight: 500;
+                }
+                #dy-var-modal.dy-theme-light .dy-btn-light {
+                    background: linear-gradient(90deg, rgb(55, 65, 81), rgb(75, 85, 99));
+                    border: none;
+                    color: #fff;
+                }
+                #dy-var-modal.dy-theme-light .dy-btn-light:hover {
+                    background: linear-gradient(90deg, rgb(75, 85, 99), rgb(107, 114, 128));
+                }
+            `;
+            document.head.appendChild(varStyles);
+        }
+
+        // Event bindings
+        document.getElementById('dy-var-cancel').addEventListener('click', closeVarModal);
+        // Legacy inline var form removed; popup editor is used instead
+        // Render variable list
+        renderVarList();
+    }
+
+    // Monaco loader state
+    let monacoLoading = false;
+
+    function loadMonacoEditor() {
+        return new Promise((resolve, reject) => {
+            if (typeof monaco !== 'undefined') {
+                resolve(monaco);
+                return;
+            }
+
+            if (monacoLoading) {
+                // Wait for loading to complete
+                const checkInterval = setInterval(() => {
+                    if (typeof monaco !== 'undefined') {
+                        clearInterval(checkInterval);
+                        resolve(monaco);
+                    }
+                }, 100);
+                setTimeout(() => {
+                    clearInterval(checkInterval);
+                    reject(new Error('Monaco Editor loading timeout'));
+                }, 10000);
+                return;
+            }
+
+            monacoLoading = true;
+
+            // Load Monaco Editor loader
+            const loaderScript = document.createElement('script');
+            loaderScript.src = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js';
+            loaderScript.onload = () => {
+                // Configure Monaco loader
+                if (typeof require !== 'undefined' && require.config) {
+                    require.config({
+                        paths: {
+                            'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs'
+                        }
+                    });
+                    
+                    // Load Monaco Editor
+                    require(['vs/editor/editor.main'], () => {
+                        monacoLoading = false;
+                        resolve(monaco);
+                    }, reject);
+                } else {
+                    monacoLoading = false;
+                    reject(new Error('Require.js not available'));
+                }
+            };
+            loaderScript.onerror = () => {
+                monacoLoading = false;
+                reject(new Error('Failed to load Monaco Editor loader'));
+            };
+            document.head.appendChild(loaderScript);
+        });
+    }
+
+    // varMonacoEditor and inline var editor removed; use popup Monaco instances instead
+
+    function openVarManagerPanel() {
+        ensureVarModalExists();
+        const modal = document.getElementById('dy-var-modal');
+        if (!modal) return;
+
+        // Apply theme
+        if (settings.theme === 'light') modal.classList.add('dy-theme-light'); else modal.classList.remove('dy-theme-light');
+
+        // Show the modal
+        modal.style.display = 'block';
+        const overlay = modal.querySelector('.dy-var-overlay');
+        if (overlay) overlay.style.opacity = '1';
+
+        // Bind open popup button
+        const openVarBtn = document.getElementById('dy-open-var-popup');
+        if (openVarBtn && !openVarBtn._bound) {
+            openVarBtn.addEventListener('click', () => {
+                ensureVarEditPopupExists();
+                openVarEditPopup();
+            });
+            openVarBtn._bound = true;
+        }
+
+        // Re-initialize Monaco Editor when opening panel
+        setTimeout(() => {
+            initVarMonacoEditor();
+        }, 100);
+
+        // Render variable list
+        renderVarList();
+    }
+
+    function closeVarModal() {
+        const modal = document.getElementById('dy-var-modal');
+        if (!modal) return;
+        modal.style.display = 'none';
+    }
+
+    function renderVarList() {
+        const list = document.getElementById('dy-manage-vars-list');
+        if (!list) return;
+
+        list.innerHTML = '';
+
+        // 合并系统变量和自定义变量
+        const allVars = { ...SYSTEM_VARS, ...customVars };
+        
+        if (Object.keys(allVars).length === 0) {
+            list.innerHTML = '<li class="dy-empty">暂无变量</li>';
+            return;
+        }
+
+        Object.entries(allVars).forEach(([varName, varData]) => {
+            const li = document.createElement('li');
+            li.className = 'dy-var-item';
+            const typeLabel = varData.type === 'function' ? '函数（Function）' : '变量（Variable）';
+            const isSystem = varData.isSystem;
+            
+            li.innerHTML = `
+                <div class="dy-var-item-name">${isSystem ? '<span class="dy-var-system-label">[系统]</span>' : ''}$${escapeHtml(varName)}</div>
+                <div class="dy-var-item-type">${escapeHtml(typeLabel)} ${isSystem ? '<span class="dy-var-uneditable">(不可编辑)</span>' : ''}</div>
+                ${!isSystem ? `
+                <div class="dy-var-actions">
+                    <button class="dy-var-edit" data-name="${escapeAttr(varName)}">编辑</button>
+                    <button class="dy-var-delete" data-name="${escapeAttr(varName)}">删除</button>
+                </div>
+                ` : ''}
+            `;
+            list.appendChild(li);
+        });
+
+        // Bind events
+        list.querySelectorAll('.dy-var-edit').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const varName = e.currentTarget.dataset.name;
+                editVar(varName);
+            });
+        });
+
+        list.querySelectorAll('.dy-var-delete').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const varName = e.currentTarget.dataset.name;
+                deleteVar(varName);
+            });
+        });
+    }
+
+    // Inline variable form save removed; use popup saveVarFromPopup
+
+    function editVar(varName) {
+        ensureVarEditPopupExists();
+        openVarEditPopup(varName);
+    }
+
+    function deleteVar(varName) {
+        if (!confirm(`确定要删除变量 $${varName} 吗？`)) return;
+
+        delete customVars[varName];
+        saveCustomVars();
+        renderVarList();
+    }
+
+    // --- Macro Edit Popup ---
+    function ensureMacroEditPopupExists() {
+        if (document.getElementById('dy-macro-edit-popup')) return;
+        const popup = document.createElement('div');
+        popup.id = 'dy-macro-edit-popup';
+        popup.style.display = 'none';
+        popup.innerHTML = `
+            <div class="dy-macro-popup-overlay">
+                <div class="dy-macro-popup-box">
+                    <div class="dy-macro-popup-header">
+                        <strong id="dy-macro-popup-title">编辑宏</strong>
+                        <div class="dy-macro-popup-controls">
+                            <button id="dy-macro-popup-cancel" class="dy-btn dy-btn-light">取消</button>
+                        </div>
+                    </div>
+                    <div class="dy-macro-popup-body">
+                        <div class="dy-form-group"><label>名称</label><input id="dy-macro-popup-name" class="dy-input" type="text" /></div>
+                            <div class="dy-form-group"><label>描述</label><input id="dy-macro-popup-desc" class="dy-input" type="text" /></div>
+                            <div class="dy-form-group"><label>代码</label><div id="dy-macro-popup-editor" class="monaco-container h200" style="height:220px;border-radius:6px;overflow:hidden;"></div></div>
+                            <div style="text-align:right;margin-top:8px;"><button id="dy-save-macro-popup" class="dy-btn dy-btn-primary">保存</button></div>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(popup);
+
+        // popup styles (modernized)
+        const s = document.createElement('style');
+        s.id = 'dy-macro-edit-popup-styles';
+        s.innerHTML = `
+            #dy-macro-edit-popup { position: fixed; inset: 0; display: none; z-index: 10005; }
+            #dy-macro-edit-popup .dy-macro-popup-overlay { position: absolute; inset: 0; display:flex; align-items:center; justify-content:center; padding:20px; background: rgba(2,6,23,0.45); backdrop-filter: blur(4px); }
+            #dy-macro-edit-popup .dy-macro-popup-box { width: min(880px, 96%); max-width: 900px; background: linear-gradient(180deg, var(--dy-bg1, #0f1114), var(--dy-bg2, #09090a)); color: var(--dy-text, #e6eef8); padding: 20px; border-radius: 12px; box-shadow: 0 16px 48px rgba(2,6,23,0.6); border: 1px solid rgba(0,0,0,0.08); }
+            #dy-macro-edit-popup .dy-macro-popup-header { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; }
+            #dy-macro-edit-popup .dy-macro-popup-header strong { font-size: 16px; }
+            #dy-macro-edit-popup .dy-macro-popup-controls button { margin-left:8px; }
+            #dy-macro-edit-popup .dy-form-group { margin-bottom: 12px; }
+            #dy-macro-edit-popup label { display:block; font-size:12px; color: var(--dy-muted); margin-bottom:6px; }
+            #dy-macro-edit-popup input[type="text"] { width:100%; padding:10px 12px; border-radius:8px; border:1px solid rgba(0,0,0,0.06); background: rgba(255,255,255,0.02); color: var(--dy-text); }
+            #dy-macro-edit-popup .monaco-container { border-radius:8px; overflow:hidden; border:1px solid rgba(0,0,0,0.06); }
+            #dy-macro-edit-popup .dy-macro-popup-body { max-height: 72vh; overflow:auto; padding-right:6px; }
+            #dy-macro-edit-popup .dy-btn { padding:8px 12px; border-radius:8px; font-weight:600; }
+            #dy-macro-edit-popup .dy-btn.dy-btn-light { background: transparent; border:1px solid rgba(0,0,0,0.06); color: var(--dy-text, #e6eef8); }
+            #dy-macro-edit-popup .dy-btn.dy-btn-primary { background: linear-gradient(90deg,var(--dy-accent1, #2563eb),var(--dy-accent2, #06b6d4)); color:#fff; border:none; border-radius:10px; box-shadow: 0 8px 18px rgba(2,6,23,0.18); transition: transform 120ms, box-shadow 120ms; }
+            #dy-macro-edit-popup .dy-btn.dy-btn-primary:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(2,6,23,0.22); }
+            #dy-macro-edit-popup .dy-btn.dy-btn-primary:active { transform: translateY(0); box-shadow: 0 6px 14px rgba(2,6,23,0.12); }
+            #dy-macro-edit-popup .dy-btn { cursor: pointer; }
+            #dy-macro-edit-popup .dy-input { width:100%; padding:10px 12px; border-radius:8px; border:1px solid rgba(0,0,0,0.06); background: var(--dy-bg2, rgba(255,255,255,0.02)); color: var(--dy-text, #e6eef8); }
+            #dy-macro-edit-popup .dy-select { width:100%; padding:10px 12px; border-radius:8px; border:1px solid rgba(0,0,0,0.06); background: var(--dy-bg2, rgba(255,255,255,0.02)); color: var(--dy-text, #e6eef8); }
+            #dy-macro-edit-popup .dy-mono { font-family: 'Fira Code', monospace; font-size:13px; }
+            #dy-macro-edit-popup .dy-macro-popup-box.dy-theme-light { background: linear-gradient(180deg, var(--dy-bg1, #ffffff), var(--dy-bg2, #f8fafc)); color: var(--dy-text, #0f1724); border: 1px solid rgba(0,0,0,0.06); }
+            #dy-macro-edit-popup .dy-macro-popup-box.dy-theme-light .dy-input, #dy-macro-edit-popup .dy-macro-popup-box.dy-theme-light .dy-select { background: var(--dy-bg2, #f8fafc); color: var(--dy-text, #0f1724); border: 1px solid rgba(0,0,0,0.08); }
+            #dy-macro-edit-popup .dy-macro-popup-box.dy-theme-light label { color: #374151; }
+            #dy-macro-edit-popup .dy-macro-popup-box.dy-theme-light .dy-btn-light { background: linear-gradient(90deg, rgb(55, 65, 81), rgb(75, 85, 99)); border: none; color: #fff; }
+            #dy-macro-edit-popup .dy-macro-popup-box.dy-theme-light .dy-btn-light:hover { background: linear-gradient(90deg, rgb(75, 85, 99), rgb(107, 114, 128)); }
+            @media (max-width: 640px) { #dy-macro-edit-popup .dy-macro-popup-box { width: 96%; padding: 14px; } }
+        `;
+        document.head.appendChild(s);
+
+        document.getElementById('dy-macro-popup-cancel').addEventListener('click', closeMacroEditPopup);
+        document.getElementById('dy-save-macro-popup').addEventListener('click', saveMacroFromPopup);
+    }
+
+    function openMacroEditPopup(name) {
+        ensureMacroEditPopupExists();
+        const popup = document.getElementById('dy-macro-edit-popup');
+        if (!popup) return;
+        document.getElementById('dy-macro-popup-title').textContent = name ? `编辑宏: ${name}` : '新建宏';
+        document.getElementById('dy-macro-popup-name').value = name || '';
+        document.getElementById('dy-macro-popup-desc').value = (name && macros[name] && macros[name].description) ? macros[name].description : '';
+        popup.style.display = 'block';
+        // Apply theme class to popup box for light/dark styling
+        const vbox = popup.querySelector('.dy-var-popup-box');
+        if (vbox) {
+            if (settings && settings.theme === 'light') vbox.classList.add('dy-theme-light'); else vbox.classList.remove('dy-theme-light');
+        }
+        // Apply theme class to popup box for light/dark styling
+        const box = popup.querySelector('.dy-macro-popup-box');
+        if (box) {
+            if (settings && settings.theme === 'light') box.classList.add('dy-theme-light'); else box.classList.remove('dy-theme-light');
+        }
+
+        // Initialize Monaco inside popup
+        loadMonacoEditorOnce().then((monaco) => {
+            const container = document.getElementById('dy-macro-popup-editor');
+            if (!container || !monaco) return;
+            if (!window.__dy_macro_popup_editor) {
+                window.__dy_macro_popup_editor = monaco.editor.create(container, {
+                    value: (name && macros[name] && macros[name].code) ? macros[name].code : '',
+                    language: 'javascript',
+                    theme: (settings && settings.theme === 'light') ? 'dy-light' : 'dy-dark',
+                    lineNumbers: 'on',
+                    wordWrap: 'on',
+                    minimap: { enabled: false },
+                    automaticLayout: true,
+                });
+                // Provide simple completions/snippets for macros
+                monaco.languages.registerCompletionItemProvider('javascript', {
+                    provideCompletionItems: function(model, position) {
+                        const suggestions = [];
+                        // basic helpers
+                        const push = (s) => suggestions.push(s);
+                        push({ label: '$targetName', kind: monaco.languages.CompletionItemKind.Variable, insertText: '$targetName' });
+                        push({ label: '$date', kind: monaco.languages.CompletionItemKind.Variable, insertText: '$date' });
+                        push({ label: '$sinceDate()', kind: monaco.languages.CompletionItemKind.Function, insertText: '$sinceDate("YYYY-M-D")' });
+                        push({ label: 'daysSince()', kind: monaco.languages.CompletionItemKind.Function, insertText: 'daysSince("YYYY-M-D")' });
+                        push({ label: 'for-loop', kind: monaco.languages.CompletionItemKind.Snippet, insertText: ['for (let i = 0; i < ${1:count}; i++) {', '\t$0', '}'].join('\n'), insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet });
+
+                        // dynamic: custom variables
+                        try {
+                            Object.keys(customVars || {}).forEach(v => {
+                                push({ label: `$${v}`, kind: monaco.languages.CompletionItemKind.Variable, insertText: `$${v}` });
+                            });
+                        } catch (e) {}
+
+                        // dynamic: existing macro names
+                        try {
+                            Object.keys(macros || {}).forEach(m => {
+                                push({ label: m, kind: monaco.languages.CompletionItemKind.Function, insertText: `${m}()` });
+                            });
+                        } catch (e) {}
+
+                        return { suggestions };
+                    }
+                });
+            } else {
+                // update content and theme
+                window.__dy_macro_popup_editor.setValue((name && macros[name] && macros[name].code) ? macros[name].code : '');
+                monaco.editor.setTheme((settings && settings.theme === 'light') ? 'dy-light' : 'dy-dark');
+            }
+        });
+    }
+
+    function closeMacroEditPopup() { const p = document.getElementById('dy-macro-edit-popup'); if (p) p.style.display = 'none'; }
+
+    function saveMacroFromPopup() {
+        const nameInput = document.getElementById('dy-macro-popup-name');
+        const descInput = document.getElementById('dy-macro-popup-desc');
+        const codeInput = document.getElementById('dy-macro-popup-code');
+        const name = nameInput.value.trim();
+        const desc = descInput.value.trim();
+        let code = '';
+        if (window.__dy_macro_popup_editor && window.__dy_macro_popup_editor.getModel) {
+            code = window.__dy_macro_popup_editor.getModel().getValue();
+        } else if (codeInput) {
+            code = codeInput.value.trim();
+        }
+        if (!name || !code) { alert('宏名称和代码不能为空'); return; }
+        if (macros[name]) { updateMacro(name, code, desc, macros[name].enabled); notify('成功','宏已更新'); }
+        else { addMacro(name, code, desc); notify('成功','宏已创建'); }
+        renderMacroLists();
+        closeMacroEditPopup();
+        try { if (typeof __dy_refreshMonacoCompletions === 'function') __dy_refreshMonacoCompletions(); } catch (e) {}
+    }
+
+    // --- Var Edit Popup ---
+    function ensureVarEditPopupExists() {
+        if (document.getElementById('dy-var-edit-popup')) return;
+        const popup = document.createElement('div');
+        popup.id = 'dy-var-edit-popup';
+        popup.style.display = 'none';
+        popup.innerHTML = `
+            <div class="dy-var-popup-overlay">
+                <div class="dy-var-popup-box">
+                    <div class="dy-var-popup-header">
+                        <strong id="dy-var-popup-title">编辑变量</strong>
+                        <div class="dy-var-popup-controls"><button id="dy-var-popup-cancel" class="dy-btn dy-btn-light">取消</button></div>
+                    </div>
+                    <div class="dy-var-popup-body">
+                        <div class="dy-form-group"><label>变量名</label><input id="dy-var-popup-name" class="dy-input" type="text" /></div>
+                        <div class="dy-form-group"><label>类型</label><select id="dy-var-popup-type" class="dy-select"><option value="function">函数</option><option value="variable">变量</option></select></div>
+                        <div class="dy-form-group"><label>值/代码</label><div id="dy-var-popup-editor" class="monaco-container h150" style="height:160px;border-radius:6px;overflow:hidden;"></div></div>
+                        <div style="text-align:right;margin-top:8px;"><button id="dy-save-var-popup" class="dy-btn dy-btn-primary">保存</button></div>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(popup);
+
+        const s = document.createElement('style'); s.id = 'dy-var-edit-popup-styles';
+        s.innerHTML = `
+            #dy-var-edit-popup { position: fixed; inset: 0; display: none; z-index: 10006; }
+            #dy-var-edit-popup .dy-var-popup-overlay { position: absolute; inset: 0; display:flex; align-items:center; justify-content:center; padding:20px; background: rgba(2,6,23,0.45); backdrop-filter: blur(3px); }
+            #dy-var-edit-popup .dy-var-popup-box { width: min(720px, 96%); max-width: 760px; background: linear-gradient(180deg, var(--dy-bg1, #0f1114), var(--dy-bg2, #09090a)); color: var(--dy-text, #e6eef8); padding: 18px; border-radius: 12px; box-shadow: 0 12px 36px rgba(2,6,23,0.55); border: 1px solid rgba(0,0,0,0.08); }
+            #dy-var-edit-popup .dy-form-group { margin-bottom: 10px; }
+            #dy-var-edit-popup label { display:block; font-size:12px; color: var(--dy-muted, #9CA3AF); margin-bottom:6px; }
+            #dy-var-edit-popup .dy-input, #dy-var-edit-popup .dy-select { width:100%; padding:8px 10px; border-radius:8px; border:1px solid rgba(0,0,0,0.06); background: var(--dy-bg2, rgba(255,255,255,0.02)); color: var(--dy-text, #e6eef8); }
+            #dy-var-edit-popup .monaco-container { border-radius:8px; overflow:hidden; border:1px solid rgba(0,0,0,0.06); }
+            #dy-var-edit-popup .dy-btn { padding:8px 12px; border-radius:8px; }
+            #dy-var-edit-popup .dy-btn.dy-btn-primary { background: linear-gradient(90deg,var(--dy-accent1, #2563eb),var(--dy-accent2, #06b6d4)); color:#fff; border:none; border-radius:10px; box-shadow: 0 8px 18px rgba(2,6,23,0.18); transition: transform 120ms, box-shadow 120ms; }
+            #dy-var-edit-popup .dy-btn.dy-btn-primary:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(2,6,23,0.22); }
+            #dy-var-edit-popup .dy-btn.dy-btn-primary:active { transform: translateY(0); box-shadow: 0 6px 14px rgba(2,6,23,0.12); }
+            #dy-var-edit-popup .dy-var-popup-box.dy-theme-light { background: linear-gradient(180deg, var(--dy-bg1, #ffffff), var(--dy-bg2, #f8fafc)); color: var(--dy-text, #0f1724); border: 1px solid rgba(0,0,0,0.06); }
+            #dy-var-edit-popup .dy-var-popup-box.dy-theme-light .dy-input, #dy-var-edit-popup .dy-var-popup-box.dy-theme-light .dy-select { background: var(--dy-bg2, #f8fafc); color: var(--dy-text, #0f1724); border: 1px solid rgba(0,0,0,0.08); }
+            #dy-var-edit-popup .dy-var-popup-box.dy-theme-light label { color: #374151; }
+            #dy-var-edit-popup .dy-var-popup-box.dy-theme-light .dy-btn-light { background: linear-gradient(90deg, rgb(55, 65, 81), rgb(75, 85, 99)); border: none; color: #fff; }
+            #dy-var-edit-popup .dy-var-popup-box.dy-theme-light .dy-btn-light:hover { background: linear-gradient(90deg, rgb(75, 85, 99), rgb(107, 114, 128)); }
+            @media (max-width: 640px) { #dy-var-edit-popup .dy-var-popup-box { width: 96%; padding: 12px; } }
+        `;
+        document.head.appendChild(s);
+
+        document.getElementById('dy-var-popup-cancel').addEventListener('click', closeVarEditPopup);
+        document.getElementById('dy-save-var-popup').addEventListener('click', saveVarFromPopup);
+    }
+
+    function openVarEditPopup(varName) {
+        ensureVarEditPopupExists();
+        const popup = document.getElementById('dy-var-edit-popup');
+        if (!popup) return;
+        document.getElementById('dy-var-popup-title').textContent = varName ? `编辑变量: ${varName}` : '新建变量';
+        document.getElementById('dy-var-popup-name').value = varName || '';
+        popup.style.display = 'block';
+
+        // init Monaco for var popup
+        loadMonacoEditorOnce().then((monaco) => {
+            const container = document.getElementById('dy-var-popup-editor');
+            if (!container || !monaco) return;
+            if (!window.__dy_var_popup_editor) {
+                window.__dy_var_popup_editor = monaco.editor.create(container, {
+                    value: (varName && customVars[varName]) ? (customVars[varName].value || '') : '',
+                    language: 'javascript',
+                    theme: (settings && settings.theme === 'light') ? 'dy-light' : 'dy-dark',
+                    lineNumbers: 'off',
+                    wordWrap: 'on',
+                    minimap: { enabled: false },
+                    automaticLayout: true,
+                });
+                // Provide completions for variable expressions
+                monaco.languages.registerCompletionItemProvider('javascript', {
+                    provideCompletionItems: function(model, position) {
+                        const suggestions = [];
+                        const push = s => suggestions.push(s);
+                        push({ label: '$targetName', kind: monaco.languages.CompletionItemKind.Variable, insertText: '$targetName' });
+                        push({ label: '$date', kind: monaco.languages.CompletionItemKind.Variable, insertText: '$date' });
+                        push({ label: '$sinceDate()', kind: monaco.languages.CompletionItemKind.Function, insertText: '$sinceDate("YYYY-M-D")' });
+                        push({ label: 'daysSince()', kind: monaco.languages.CompletionItemKind.Function, insertText: 'daysSince("YYYY-M-D")' });
+                        try { Object.keys(customVars || {}).forEach(v => push({ label: `$${v}`, kind: monaco.languages.CompletionItemKind.Variable, insertText: `$${v}` })); } catch (e) {}
+                        return { suggestions };
+                    }
+                });
+            } else {
+                window.__dy_var_popup_editor.setValue((varName && customVars[varName]) ? (customVars[varName].value || '') : '');
+                monaco.editor.setTheme((settings && settings.theme === 'light') ? 'dy-light' : 'dy-dark');
+            }
+        });
+    }
+
+    function closeVarEditPopup() { const p = document.getElementById('dy-var-edit-popup'); if (p) p.style.display = 'none'; }
+
+    function saveVarFromPopup() {
+        const name = document.getElementById('dy-var-popup-name').value.trim();
+        const type = document.getElementById('dy-var-popup-type').value;
+        let value = '';
+        if (window.__dy_var_popup_editor && window.__dy_var_popup_editor.getModel) {
+            value = window.__dy_var_popup_editor.getModel().getValue().trim();
+        } else {
+            const ta = document.getElementById('dy-var-popup-value');
+            value = ta ? ta.value.trim() : '';
+        }
+        if (!name) { alert('请输入变量名称'); return; }
+        if (!value) { alert('请输入变量值或函数代码'); return; }
+        if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) { alert('变量名称只能包含字母、数字和下划线，且必须以字母或下划线开头'); return; }
+        customVars[name] = { type, value };
+        saveCustomVars();
+        renderVarList();
+        closeVarEditPopup();
+        try { if (typeof __dy_refreshMonacoCompletions === 'function') __dy_refreshMonacoCompletions(); } catch (e) {}
+        alert('变量保存成功');
+    }
+
 
     // 从 DOM 获取用户头像
     function getUserAvatarFromDOM(name) {
@@ -2264,26 +3308,28 @@
             const lastSendDate = targetData && targetData.lastSendDate ? `上次发送：${targetData.lastSendDate}` : '未发送';
             const isPersistent = !!persistent[name];
             li.innerHTML = `
-                <div class="dy-item-top" style="display:flex;justify-content:space-between;align-items:flex-start;">
-                    <label style="flex:1;min-width:0;">
+                <div class="dy-item-top flex-between">
+                    <label class="dy-item-label">
                         <input class="dy-select-checkbox" type="checkbox" data-name="${escapeAttr(name)}" ${selectedSet.has(name) ? 'checked' : ''} />
-                        ${avatar ? `<img class="dy-item-avatar" src="${escapeAttr(avatar)}" style="width:24px;height:24px;border-radius:50%;vertical-align:middle;margin-right:6px;" />` : ''}
+                        ${avatar ? `<img class="dy-item-avatar" src="${escapeAttr(avatar)}" />` : ''}
                         <span class="dy-item-name">${escapeHtml(name)}</span>
-                        <span class="chat-type-label" style="background:${typeColor};color:white;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:5px;">${typeLabel}</span>
+                        <span class="chat-type-label">${typeLabel}</span>
                     </label>
-                    <button class="dy-btn dy-btn-send" data-name="${escapeAttr(name)}" style="padding:6px 14px;font-size:12px;background:#007bff;border:none;border-radius:6px;color:#fff;cursor:pointer;white-space:nowrap;">发送</button>
+                    <button class="dy-btn dy-btn-send" data-name="${escapeAttr(name)}">发送</button>
                 </div>
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;">
-                    <div class="dy-item-date" style="font-size:11px; color:#aaa;">${escapeHtml(lastSendDate)}</div>
-                    <button class="dy-btn dy-btn-menu" data-name="${escapeAttr(name)}" data-action="menu" style="background:none;border:none;color:#aaa;cursor:pointer;font-size:16px;padding:2px 6px;">⋮</button>
+                <div class="dy-item-row">
+                    <div class="dy-item-date">${escapeHtml(lastSendDate)}</div>
+                    <button class="dy-btn-menu" data-name="${escapeAttr(name)}" data-action="menu">⋮</button>
                 </div>
-                <div class="dy-item-menu" id="menu-${escapeAttr(name)}" style="display:none;position:absolute;right:10px;top:50px;background:#1c1c22;border:1px solid rgba(255,255,255,0.1);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.3);z-index:1000;min-width:120px;">
-                    ${!isPersistent ? `<button class="dy-menu-item dy-btn-persist" data-name="${escapeAttr(name)}" style="width:100%;padding:8px 12px;background:none;border:none;color:#fff;cursor:pointer;text-align:left;">添加目标</button>` : ''}
-                    <button class="dy-menu-item dy-btn-edit" data-name="${escapeAttr(name)}" style="width:100%;padding:8px 12px;background:none;border:none;color:#fff;cursor:pointer;text-align:left;">模板</button>
-                    <button class="dy-menu-item dy-btn-update" data-name="${escapeAttr(name)}" style="width:100%;padding:8px 12px;background:none;border:none;color:#fff;cursor:pointer;text-align:left;">更新名字</button>
-                    ${isPersistent ? `<button class="dy-menu-item dy-btn-unpersist" data-name="${escapeAttr(name)}" style="width:100%;padding:8px 12px;background:none;border:none;color:#fff;cursor:pointer;text-align:left;">移除目标</button>` : ''}
+                <div class="dy-item-menu" id="menu-${escapeAttr(name)}">
+                    ${!isPersistent ? `<button class="dy-menu-item dy-btn-persist" data-name="${escapeAttr(name)}">添加目标</button>` : ''}
+                    <button class="dy-menu-item dy-btn-edit" data-name="${escapeAttr(name)}">模板</button>
+                    <button class="dy-menu-item dy-btn-update" data-name="${escapeAttr(name)}">更新名字</button>
+                    ${isPersistent ? `<button class="dy-menu-item dy-btn-unpersist" data-name="${escapeAttr(name)}">移除目标</button>` : ''}
                 </div>
             `;
+            // set per-item chat type background via CSS variable for easier theming
+            try { li.style.setProperty('--chat-type-bg', typeColor); } catch (e) {}
             stagedList.appendChild(li);
         });
 
@@ -2301,25 +3347,27 @@
             const li = document.createElement('li');
             li.className = 'dy-item';
             li.innerHTML = `
-                <div class="dy-item-top" style="display:flex;justify-content:space-between;align-items:flex-start;">
-                    <label style="flex:1;min-width:0;">
+                <div class="dy-item-top flex-between">
+                    <label class="dy-item-label">
                         <input class="dy-select-checkbox" type="checkbox" data-name="${escapeAttr(name)}" ${selectedSet.has(name) ? 'checked' : ''} />
-                        ${avatar ? `<img class="dy-item-avatar" src="${escapeAttr(avatar)}" style="width:24px;height:24px;border-radius:50%;vertical-align:middle;margin-right:6px;" />` : ''}
+                        ${avatar ? `<img class="dy-item-avatar" src="${escapeAttr(avatar)}" />` : ''}
                         <span class="dy-item-name">${escapeHtml(name)}</span>
-                        <span class="chat-type-label" style="background:${typeColor};color:white;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:5px;">${typeLabel}</span>
+                        <span class="chat-type-label">${typeLabel}</span>
                     </label>
-                    <button class="dy-btn dy-btn-send" data-name="${escapeAttr(name)}" style="padding:6px 14px;font-size:12px;background:#007bff;border:none;border-radius:6px;color:#fff;cursor:pointer;white-space:nowrap;">发送</button>
+                    <button class="dy-btn dy-btn-send" data-name="${escapeAttr(name)}">发送</button>
                 </div>
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;">
-                    <div class="dy-item-date" style="font-size:11px; color:#aaa;">${escapeHtml(lastSendDate)}</div>
-                    <button class="dy-btn dy-btn-menu" data-name="${escapeAttr(name)}" data-action="menu" style="background:none;border:none;color:#aaa;cursor:pointer;font-size:16px;padding:2px 6px;">⋮</button>
+                <div class="dy-item-row">
+                    <div class="dy-item-date">${escapeHtml(lastSendDate)}</div>
+                    <button class="dy-btn-menu" data-name="${escapeAttr(name)}" data-action="menu">⋮</button>
                 </div>
-                <div class="dy-item-menu" id="menu-${escapeAttr(name)}" style="display:none;position:absolute;right:10px;top:50px;background:#1c1c22;border:1px solid rgba(255,255,255,0.1);border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.3);z-index:1000;min-width:120px;">
-                    <button class="dy-menu-item dy-btn-edit" data-name="${escapeAttr(name)}" style="width:100%;padding:8px 12px;background:none;border:none;color:#fff;cursor:pointer;text-align:left;">模板</button>
-                    <button class="dy-menu-item dy-btn-update" data-name="${escapeAttr(name)}" style="width:100%;padding:8px 12px;background:none;border:none;color:#fff;cursor:pointer;text-align:left;">更新名字</button>
-                    <button class="dy-menu-item dy-btn-unpersist" data-name="${escapeAttr(name)}" style="width:100%;padding:8px 12px;background:none;border:none;color:#fff;cursor:pointer;text-align:left;">移除目标</button>
+                <div class="dy-item-menu" id="menu-${escapeAttr(name)}">
+                    <button class="dy-menu-item dy-btn-edit" data-name="${escapeAttr(name)}">模板</button>
+                    <button class="dy-menu-item dy-btn-update" data-name="${escapeAttr(name)}">更新名字</button>
+                    <button class="dy-menu-item dy-btn-unpersist" data-name="${escapeAttr(name)}">移除目标</button>
                 </div>
             `;
+            // set per-item chat type background via CSS variable for easier theming
+            try { li.style.setProperty('--chat-type-bg', typeColor); } catch (e) {}
             persistList.appendChild(li);
         });
 
@@ -2428,16 +3476,7 @@
         if (intervalInput) intervalInput.value = settings.sendIntervalSec || 3;
         updateSchedulerStatus();
 
-        // 宏管理面板事件绑定
-        const saveMacroBtn = document.getElementById('dy-save-macro');
-        if (saveMacroBtn) saveMacroBtn.addEventListener('click', saveMacroFromForm);
-
-        const clearMacroFormBtn = document.getElementById('dy-clear-macro-form');
-        if (clearMacroFormBtn) clearMacroFormBtn.addEventListener('click', () => {
-            document.getElementById('dy-macro-name').value = '';
-            document.getElementById('dy-macro-desc').value = '';
-            document.getElementById('dy-macro-code').value = '';
-        });
+        // Legacy inline macro form event bindings removed; macros edited via popup
 
         // 渲染宏列表
         renderMacroLists();
@@ -2469,10 +3508,10 @@
     // Helper function to get chat type color
     function getChatTypeColor(type) {
         switch(type) {
-            case 'group': return '#3b82f6'; // Blue for group
-            case 'stranger': return '#f59e0b'; // Amber for stranger
+            case 'group': return 'var(--dy-accent1)'; // Blue for group (theme)
+            case 'stranger': return 'var(--dy-accent-alt1)'; // Gray for stranger (theme)
             case 'friend':
-            default: return '#10b981'; // Green for friend
+            default: return 'var(--dy-success1)'; // Green for friend (theme)
         }
     }
 
@@ -2549,6 +3588,8 @@
         }
         savePersistent();
         renderLists();
+        // 刷新 Monaco 补全以实现实时更新
+        try { if (typeof __dy_refreshMonacoCompletions === 'function') __dy_refreshMonacoCompletions(); } catch (e) {}
         // 关闭模态
         closeTemplateModal();
     }
@@ -2694,8 +3735,7 @@
             li.innerHTML = `
                 <div class="dy-macro-item-name">${escapeHtml(name)}</div>
                 <div class="dy-macro-item-desc">${escapeHtml(macro.description || '无描述')}</div>
-                <div class="dy-macro-item-code">${escapeHtml(macro.code.substring(0, 100))}${macro.code.length > 100 ? '...' : ''}</div>
-                <div class="dy-macro-item-templates" style="font-size:11px;color:#aaa;margin-top:4px">
+                <div class="dy-macro-item-templates">
                     ${templatesUsingMacro.length > 0 ? `被 ${templatesUsingMacro.length} 个模板使用: ${escapeHtml(templatesUsingMacro.slice(0, 3).join(', '))}${templatesUsingMacro.length > 3 ? '...' : ''}` : '未被任何模板使用'}
                 </div>
                 <div class="dy-macro-actions">
@@ -2716,15 +3756,15 @@
             li.innerHTML = `
                 <div class="dy-macro-item-name">${escapeHtml(templateName)}</div>
                 <div class="dy-macro-item-desc">当前宏: ${templateData.macros && templateData.macros.length > 0 ? escapeHtml(templateData.macros.join(', ')) : '无'}</div>
-                <div class="dy-macro-assign" style="margin-top:8px">
-                    <select class="dy-macro-select" data-template="${escapeAttr(templateName)}" style="width:100%;padding:4px;margin-bottom:4px;">
+                <div class="dy-macro-assign">
+                    <select class="dy-macro-select" data-template="${escapeAttr(templateName)}">
                         <option value="">选择宏...</option>
                         ${Object.entries(macros).map(([name, macro]) =>
                             `<option value="${escapeAttr(name)}" ${templateData.macros && templateData.macros.includes(name) ? 'selected' : ''}>${escapeHtml(name)}</option>`
                         ).join('')}
                     </select>
                     <button class="dy-btn dy-macro-assign-btn" data-template="${escapeAttr(templateName)}">添加宏到模板</button>
-                    <button class="dy-btn dy-macro-clear-btn" data-template="${escapeAttr(templateName)}" style="margin-top:4px;">清空模板宏</button>
+                    <button class="dy-btn dy-macro-clear-btn" data-template="${escapeAttr(templateName)}">清空模板宏</button>
                 </div>
             `;
             applyList.appendChild(li);
@@ -2734,7 +3774,7 @@
         if (applyList.children.length === 0) {
             const li = document.createElement('li');
             li.className = 'dy-macro-item';
-            li.innerHTML = `<div class="dy-macro-item-desc" style="text-align:center;color:#aaa">暂无续火花目标</div>`;
+            li.innerHTML = `<div class="dy-macro-item-desc dy-empty">暂无续火花目标</div>`;
             applyList.appendChild(li);
         }
 
@@ -2750,19 +3790,8 @@
         document.querySelectorAll('.dy-macro-edit').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 const name = e.currentTarget.dataset.name;
-                const macro = macros[name];
-                if (macro) {
-                    document.getElementById('dy-macro-name').value = name;
-                    document.getElementById('dy-macro-desc').value = macro.description || '';
-                    document.getElementById('dy-macro-code').value = macro.code;
-
-                    // Also update the Monaco editor if it exists
-                    if (window.__dy_macro_monaco_editor && window.__dy_macro_monaco_editor.getModel) {
-                        window.__dy_macro_monaco_editor.getModel().setValue(macro.code);
-                    } else {
-                        document.getElementById('dy-macro-code').value = macro.code;
-                    }
-                }
+                ensureMacroEditPopupExists();
+                openMacroEditPopup(name);
             });
         });
 
@@ -2772,17 +3801,7 @@
                 if (confirm(`确定要删除宏 "${name}" 吗？\n注意：此宏可能被某些模板使用，删除后这些模板将无法执行该宏。`)) {
                     deleteMacro(name);
                     renderMacroLists(); // Refresh the lists
-                    // Clear form if the deleted macro was being edited
-                    if (document.getElementById('dy-macro-name').value === name) {
-                        document.getElementById('dy-macro-name').value = '';
-                        document.getElementById('dy-macro-desc').value = '';
-                        document.getElementById('dy-macro-code').value = '';
-
-                        // Clear Monaco editor if it exists
-                        if (window.__dy_macro_monaco_editor && window.__dy_macro_monaco_editor.getModel) {
-                            window.__dy_macro_monaco_editor.getModel().setValue('');
-                        }
-                    }
+                    // Legacy inline macro form removed; no inline fields to clear
                 }
             });
         });
@@ -2836,47 +3855,7 @@
         });
     }
 
-    function saveMacroFromForm() {
-        const nameInput = document.getElementById('dy-macro-name');
-        const descInput = document.getElementById('dy-macro-desc');
-        const codeInput = document.getElementById('dy-macro-code');
-
-        const name = nameInput.value.trim();
-        const desc = descInput.value.trim();
-
-        // Get code from Monaco editor if available, otherwise from textarea
-        let code = '';
-        if (window.__dy_macro_monaco_editor && window.__dy_macro_monaco_editor.getModel) {
-            code = window.__dy_macro_monaco_editor.getModel().getValue();
-        } else {
-            code = codeInput.value.trim();
-        }
-
-        if (!name || !code) {
-            notify('错误', '宏名称和代码不能为空');
-            return;
-        }
-
-        // Check if macro exists to update or add new
-        if (macros[name]) {
-            updateMacro(name, code, desc, macros[name].enabled);
-            notify('成功', `宏 "${name}" 已更新`);
-        } else {
-            addMacro(name, code, desc);
-            notify('成功', `宏 "${name}" 已创建`);
-        }
-
-        // Refresh lists and clear form
-        renderMacroLists();
-        nameInput.value = '';
-        descInput.value = '';
-
-        // Clear both textarea and Monaco editor
-        codeInput.value = '';
-        if (window.__dy_macro_monaco_editor && window.__dy_macro_monaco_editor.getModel) {
-            window.__dy_macro_monaco_editor.getModel().setValue('');
-        }
-    }
+    // Inline macro form save removed; use popup saveMacroFromPopup
 
     function saveScheduleFromUI() {
         const timeInput = document.getElementById('dy-schedule-time');
@@ -3007,8 +3986,14 @@
                 }
             }
 
-            // 将预处理后的代码直接视为JavaScript代码执行，先执行模板，再执行宏
-            const result = eval(`(function(){let res="";${out};${macroCode};return res;})()`);
+            // 将预处理后的代码直接视为 JavaScript 代码执行，先执行模板，再执行宏
+            // 所有变量已经在 preprocessVariables 中替换为实际值
+            const result = eval(`(function(){
+                let res="";
+                ${out};
+                ${macroCode};
+                return res;
+            })()`);
             return result;
         } catch (e) {
             return '错误: ' + e.message;
@@ -3162,6 +4147,7 @@
         loadMacros();
         loadSettings();
         loadChatTypes(); // Load chat type information
+        loadCustomVars(); // Load custom variables
 
 
         renderPanel();
